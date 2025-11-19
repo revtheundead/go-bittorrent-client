@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 
 	"github.com/revtheundead/go-bittorrent-client/internal/peer"
 	"github.com/revtheundead/go-bittorrent-client/internal/torrent"
@@ -160,7 +161,73 @@ func main() {
 		defer conn.Close()
 
 		fmt.Printf("Peer ID: %s\n", hex.EncodeToString(remoteHS.PeerID[:]))
+	// Download a piece from a peer
+	case "download_piece":
+		if len(os.Args) < 6 || os.Args[2] != "-o" {
+			fmt.Fprintln(os.Stderr, "usage: client download_piece -o <output-path> <torrent-file> <piece-index>")
+			os.Exit(1)
+		}
 
+		outputPath := os.Args[3]
+		torrentPath := os.Args[4]
+		pieceIndexStr := os.Args[5]
+
+		pieceIndex, err := strconv.Atoi(pieceIndexStr)
+		if err != nil || pieceIndex < 0 {
+			fmt.Fprintf(os.Stderr, "invalid piece index %q\n", pieceIndexStr)
+			os.Exit(1)
+		}
+
+		data, err := os.ReadFile(torrentPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "failed to read torrent file:", err)
+			os.Exit(1)
+		}
+
+		mi, err := torrent.ParseSingleFile(data)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "failed to parse torrent:", err)
+			os.Exit(1)
+		}
+
+		peerID := tracker.GeneratePeerID()
+
+		tr, err := tracker.Announce(mi, peerID)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "failed to contact tracker:", err)
+			os.Exit(1)
+		}
+		if len(tr.Peers) == 0 {
+			fmt.Fprintln(os.Stderr, "tracker returned no peers")
+			os.Exit(1)
+		}
+
+		// Pick the first peer for now.
+		p := tr.Peers[0]
+		addr := net.JoinHostPort(p.IP.String(), strconv.Itoa(int(p.Port)))
+
+		remoteHS, conn, err := peer.PerformHandshake(addr, mi.InfoHash, peerID)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "handshake failed:", err)
+			os.Exit(1)
+		}
+		defer conn.Close()
+
+		_ = remoteHS // we don't actually need it further here
+
+		pieceData, err := peer.DownloadPiece(conn, &mi.Info, pieceIndex)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "failed to download piece:", err)
+			os.Exit(1)
+		}
+
+		// Create file with -rw-r--r-- permissions
+		if err := os.WriteFile(outputPath, pieceData, 0o644); err != nil {
+			fmt.Fprintln(os.Stderr, "failed to write piece to disk:", err)
+			os.Exit(1)
+		}
+
+		fmt.Printf("File created successfully at the path %s\n", outputPath)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %q\n", command)
 		printUsage()
@@ -174,4 +241,5 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  client info <path-to-torrent-file>")
 	fmt.Fprintln(os.Stderr, "  client peers <path-to-torrent-file>")
 	fmt.Fprintln(os.Stderr, "  client handshake <path-to-torrent-file> <ip:port>")
+	fmt.Fprintln(os.Stderr, "  client download_piece -o <output-path> <torrent-file> <piece-index>")
 }

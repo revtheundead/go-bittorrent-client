@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"time"
 )
 
 const (
@@ -58,7 +59,7 @@ func (h Handshake) Serialize() []byte {
 // the remote handshake. It validates that the remote info_hash matches
 // the expected hash.
 func PerformHandshake(addr string, expectedInfoHash [infoHashLen]byte, ownPeerId [peerIDLen]byte) (*Handshake, net.Conn, error) {
-	conn, err := net.Dial("tcp", addr)
+	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to connect to peer %q: %w", addr, err)
 	}
