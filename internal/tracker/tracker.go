@@ -15,17 +15,13 @@ import (
 )
 
 const (
-	PeerIDSize       = 20                // 20 bytes per BitTorrent spec
-	PeerIDPrefix     = "-GT0001-"        // 8-byte client ID prefix
-	PeerIDPrefixSize = len(PeerIDPrefix) // 8 bytes
-	PeerIDRandomSize = PeerIDSize - PeerIDPrefixSize
-
-	ClientPort = 6881 // required port for the exercise
-
-	CompactPeerEntrySize = 6 // 4 bytes IP + 2 bytes port
-
-	IPv4Octets = 4 // number of bytes in an IPv4 address
-	PortBytes  = 2 // number of bytes in a port (big-endian)
+	peerIDSize           = 20                // 20 bytes per BitTorrent spec
+	peerIDPrefix         = "-GT0001-"        // 8-byte client ID prefix
+	peerIDPrefixSize     = len(peerIDPrefix) // 8 bytes
+	clientPort           = 6881              // operating port number
+	compactPeerEntrySize = 6                 // 4 bytes IP + 2 bytes port
+	ipv4Octets           = 4                 // number of bytes in an IPv4 address
+	portBytes            = 2                 // number of bytes in a port (big-endian)
 )
 
 type Peer struct {
@@ -39,15 +35,15 @@ type TrackerResponse struct {
 }
 
 // GeneratePeerID returns a random 20-byte peer ID for this client
-func GeneratePeerID() [PeerIDSize]byte {
-	var id [PeerIDSize]byte
+func GeneratePeerID() [peerIDSize]byte {
+	var id [peerIDSize]byte
 
 	// Copy client prefix
-	copy(id[:PeerIDPrefixSize], []byte(PeerIDPrefix))
+	copy(id[:peerIDPrefixSize], []byte(peerIDPrefix))
 
 	// Fill remaining random bytes
-	if _, err := rand.Read(id[PeerIDPrefixSize:]); err != nil {
-		copy(id[PeerIDPrefixSize:], []byte("fallback-entropy"))
+	if _, err := rand.Read(id[peerIDPrefixSize:]); err != nil {
+		copy(id[peerIDPrefixSize:], []byte("fallback-entropy"))
 	}
 
 	return id
@@ -55,8 +51,8 @@ func GeneratePeerID() [PeerIDSize]byte {
 
 // Announce contacts the tracker for the given torrent metainfo and peer ID,
 // and returns the tracker response (interval + list of peers).
-func Announce(meta *torrent.Metainfo, peerID [PeerIDSize]byte) (*TrackerResponse, error) {
-	announceURL, err := buildAnnounceURL(meta, peerID, ClientPort)
+func Announce(meta *torrent.Metainfo, peerID [peerIDSize]byte) (*TrackerResponse, error) {
+	announceURL, err := buildAnnounceURL(meta, peerID, clientPort)
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +114,7 @@ func Announce(meta *torrent.Metainfo, peerID [PeerIDSize]byte) (*TrackerResponse
 
 // buildAnnounceURL constructs the tracker announce URL with the required
 // query parameters
-func buildAnnounceURL(meta *torrent.Metainfo, peerID [PeerIDSize]byte, port uint16) (string, error) {
+func buildAnnounceURL(meta *torrent.Metainfo, peerID [peerIDSize]byte, port uint16) (string, error) {
 	u, err := url.Parse(meta.Announce)
 	if err != nil {
 		return "", fmt.Errorf("invalid announce URL %q: %w", meta.Announce, err)
@@ -166,15 +162,15 @@ func getPeers(dict map[string]interface{}) ([]Peer, error) {
 
 	b := []byte(peersStr)
 
-	if len(b)%CompactPeerEntrySize != 0 {
+	if len(b)%compactPeerEntrySize != 0 {
 		return nil, fmt.Errorf("invalid compact peer list length %d", len(b))
 	}
 
-	numPeers := len(b) / CompactPeerEntrySize
+	numPeers := len(b) / compactPeerEntrySize
 	peers := make([]Peer, 0, numPeers)
 
 	for i := 0; i < numPeers; i++ {
-		offset := i * CompactPeerEntrySize
+		offset := i * compactPeerEntrySize
 
 		ip := net.IPv4(
 			b[offset],
@@ -184,7 +180,7 @@ func getPeers(dict map[string]interface{}) ([]Peer, error) {
 		)
 
 		port := binary.BigEndian.Uint16(
-			b[offset+IPv4Octets : offset+IPv4Octets+PortBytes],
+			b[offset+ipv4Octets : offset+ipv4Octets+portBytes],
 		)
 
 		peers = append(peers, Peer{
