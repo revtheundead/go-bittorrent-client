@@ -51,8 +51,21 @@ func GeneratePeerID() [peerIDSize]byte {
 
 // Announce contacts the tracker for the given torrent metainfo and peer ID,
 // and returns the tracker response (interval + list of peers).
-func Announce(meta *torrent.Metainfo, peerID [peerIDSize]byte) (*TrackerResponse, error) {
-	announceURL, err := buildAnnounceURL(meta, peerID, clientPort)
+func AnnounceTorrent(meta *torrent.Metainfo, peerID [peerIDSize]byte) (*TrackerResponse, error) {
+	return announceWithParams(meta.Announce, meta.InfoHash, meta.Info.Length, peerID)
+}
+
+// AnnounceMagnet contacts the tracker given a raw tracker URL and info hash,
+// using left=0 because we don't know the file length from the magnet link.
+func AnnounceMagnet(trackerURL string, infoHash [20]byte, peerID [20]byte) (*TrackerResponse, error) {
+	const unknownLength int64 = 0
+	return announceWithParams(trackerURL, infoHash, unknownLength, peerID)
+}
+
+// announceWithParams makes a GET request to the tracker in the given URL and
+// returns a list of peers
+func announceWithParams(announceURL string, infoHash [20]byte, length int64, peerID [peerIDSize]byte) (*TrackerResponse, error) {
+	announceURL, err := buildAnnounceURL(announceURL, infoHash, length, peerID, clientPort)
 	if err != nil {
 		return nil, err
 	}
@@ -114,17 +127,17 @@ func Announce(meta *torrent.Metainfo, peerID [peerIDSize]byte) (*TrackerResponse
 
 // buildAnnounceURL constructs the tracker announce URL with the required
 // query parameters
-func buildAnnounceURL(meta *torrent.Metainfo, peerID [peerIDSize]byte, port uint16) (string, error) {
-	u, err := url.Parse(meta.Announce)
+func buildAnnounceURL(announceURL string, infoHash [20]byte, length int64, peerID [peerIDSize]byte, port uint16) (string, error) {
+	u, err := url.Parse(announceURL)
 	if err != nil {
-		return "", fmt.Errorf("invalid announce URL %q: %w", meta.Announce, err)
+		return "", fmt.Errorf("invalid announce URL %q: %w", announceURL, err)
 	}
 
 	q := u.Query()
 
 	// info_hash is the *raw* 20 bytes, not hex.
 	// url.Values.Encode will URL-encode it correctly
-	q.Set("info_hash", string(meta.InfoHash[:]))
+	q.Set("info_hash", string(infoHash[:]))
 
 	// peer_id is the 20-byte ID identifying this client
 	q.Set("peer_id", string(peerID[:]))
@@ -137,7 +150,12 @@ func buildAnnounceURL(meta *torrent.Metainfo, peerID [peerIDSize]byte, port uint
 	q.Set("downloaded", "0")
 
 	// Bytes left to download – for a fresh client, this is the full length.
-	q.Set("left", strconv.FormatInt(meta.Info.Length, 10))
+	left := length
+	if left <= 0 {
+		// For magnets (or unknown size), trackers usually expect a positive "left"
+		left = 1
+	}
+	q.Set("left", strconv.FormatInt(left, 10))
 
 	// Use compact peer representation
 	q.Set("compact", "1")
