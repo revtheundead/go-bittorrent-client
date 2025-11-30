@@ -22,6 +22,9 @@ const (
 	infoHashLen       = 20 // SHA-1 hash size
 	peerIDLen         = 20
 	handshakeTotalLen = 1 + protocolNameLen + reservedBytesLen + infoHashLen + peerIDLen
+
+	extensionBitByteIndex = 5
+	extensionBitMask      = 0x10
 )
 
 type Client struct {
@@ -32,6 +35,7 @@ type Client struct {
 }
 
 type Handshake struct {
+	Reserved [reservedBytesLen]byte
 	InfoHash [infoHashLen]byte
 	PeerID   [peerIDLen]byte
 }
@@ -60,7 +64,7 @@ func (h *Handshake) Serialize() []byte {
 	// reserved bytes with extension bit set
 	// 00 00 00 00 00 10 00 00
 	var reserved [reservedBytesLen]byte
-	reserved[5] = 0x10
+	reserved[extensionBitByteIndex] = extensionBitMask
 	buf = append(buf, reserved[:]...)
 
 	// info_hash
@@ -70,6 +74,10 @@ func (h *Handshake) Serialize() []byte {
 	buf = append(buf, h.PeerID[:]...)
 
 	return buf
+}
+
+func (h *Handshake) SupportsExtensions() bool {
+	return (h.Reserved[extensionBitByteIndex] & extensionBitMask) != 0
 }
 
 // NewClient initializes the connection with the peer once to avoid waiting
@@ -362,6 +370,9 @@ func readRemoteHandshake(r io.Reader) (*Handshake, error) {
 		return nil, fmt.Errorf("unexpected protocol name: %q", pstr)
 	}
 
+	var reserved [reservedBytesLen]byte
+	copy(reserved[:], rest[pstrlen:pstrlen+reservedBytesLen])
+
 	// Extract info_hash and peer_id
 	var infoHash [infoHashLen]byte
 	copy(infoHash[:], rest[pstrlen+reservedBytesLen:pstrlen+reservedBytesLen+infoHashLen])
@@ -370,6 +381,7 @@ func readRemoteHandshake(r io.Reader) (*Handshake, error) {
 	copy(peerID[:], rest[pstrlen+reservedBytesLen+infoHashLen:])
 
 	return &Handshake{
+		Reserved: reserved,
 		InfoHash: infoHash,
 		PeerID:   peerID,
 	}, nil

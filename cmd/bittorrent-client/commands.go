@@ -267,7 +267,24 @@ func runMagnetHandshake(args []string) error {
 	}
 	defer conn.Close()
 
+	// Only send extension handshake if remote peer supports it
+	if !remoteHS.SupportsExtensions() {
+		return fmt.Errorf("peer does not support extensions")
+	}
+
+	// Send extension handshake
+	if err := peer.SendExtensionHandshake(conn); err != nil {
+		return fmt.Errorf("failed to send extension handshake: %w", err)
+	}
+
+	// Receive peer's extension handshake and extract ut_metadata id
+	utMetaID, err := peer.ReceiveExtensionHandshake(conn)
+	if err != nil {
+		return fmt.Errorf("failed to receive extension handshake: %w", err)
+	}
+
 	fmt.Printf("Peer ID: %s\n", hex.EncodeToString(remoteHS.PeerID[:]))
+	fmt.Printf("Peer Metadata Extension ID: %d\n", utMetaID)
 	return nil
 }
 
