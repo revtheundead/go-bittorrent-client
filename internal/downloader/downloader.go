@@ -173,7 +173,7 @@ func workerLoop(
 	results chan<- *pieceResult,
 ) {
 	// Establish a persistent connection
-	c, err := peer.NewClient(meta, peerID, p)
+	c, err := peer.NewClient(meta.InfoHash, peerID, p)
 	if err != nil {
 		log.Printf("worker %s failed handshake: %v", c.Addr, err)
 		return
@@ -194,7 +194,7 @@ func workerLoop(
 			// Drop connection and reconnect on next iteration
 			c.Conn.Close()
 			c = nil
-			c, _ = peer.NewClient(meta, peerID, p)
+			c, _ = peer.NewClient(meta.InfoHash, peerID, p)
 			continue
 		}
 

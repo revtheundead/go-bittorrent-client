@@ -82,10 +82,10 @@ func (h *Handshake) SupportsExtensions() bool {
 
 // NewClient initializes the connection with the peer once to avoid waiting
 // unnecessarily
-func NewClient(meta *torrent.Metainfo, peerID [20]byte, p tracker.Peer) (*Client, error) {
+func NewClient(infoHash [20]byte, peerID [20]byte, p tracker.Peer) (*Client, error) {
 	addr := net.JoinHostPort(p.IP.String(), strconv.Itoa(int(p.Port)))
 
-	_, conn, err := PerformHandshake(addr, meta.InfoHash, peerID)
+	_, conn, err := PerformHandshake(addr, infoHash, peerID)
 	if err != nil {
 		return nil, fmt.Errorf("handshake with %s failed: %w", addr, err)
 	}

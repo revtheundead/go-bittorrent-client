@@ -35,6 +35,12 @@ func run(args []string) error {
 		return runMagnetParse(args[1:])
 	case "magnet_handshake":
 		return runMagnetHandshake(args[1:])
+	case "magnet_info":
+		return runMagnetInfo(args[1:])
+	case "magnet_download_piece":
+		return runMagnetDownloadPiece(args[1:])
+	case "magnet_download":
+		return runMagnetDownload(args[1:])
 	default:
 		printUsage()
 		return fmt.Errorf("unknown command: %q", args[0])
@@ -51,4 +57,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  client download -o <output-path> <torrent-file>")
 	fmt.Fprintln(os.Stderr, "  client magnet_parse <magnet-link>")
 	fmt.Fprintln(os.Stderr, "  client magnet_handshake <magnet-link>")
+	fmt.Fprintln(os.Stderr, "  client magnet_info <magnet-link>")
+	fmt.Fprintln(os.Stderr, "  client download_piece -o <output-path> <magnet_link> <piece-index>")
+	fmt.Fprintln(os.Stderr, "  client download -o <output-path> <magnet_link>")
 }

@@ -37,7 +37,7 @@ func ParseSingleFile(data []byte) (*Metainfo, error) {
 
 	root, ok := value.(map[string]interface{})
 	if !ok {
-		return nil, fmt.Errorf("top-level bencode value must be a dictionary, got %T, value")
+		return nil, fmt.Errorf("top-level bencode value must be a dictionary, got %T, value", value)
 	}
 
 	// Get "announce" (tracker URL)

@@ -36,6 +36,16 @@ func Decode(s string) (interface{}, error) {
 	return value, nil
 }
 
+// DecodeBytes decodes a single bencoded value from b and returns the
+// value plus the number of bytes consumed. It does NOT complain about
+// trailing data.
+func DecodeBytes(b []byte) (interface{}, int, error) {
+	if len(b) == 0 {
+		return nil, 0, fmt.Errorf("empty input")
+	}
+	return decodeValue(b)
+}
+
 // Encode is the high-level entry point for encoding a single
 // Go value as bencode.
 //

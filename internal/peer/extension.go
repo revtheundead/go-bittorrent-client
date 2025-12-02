@@ -8,9 +8,10 @@ import (
 )
 
 const (
-	msgExtended         byte = 20 // extension message
-	extMsgHandshake     byte = 0  // extension handshake
-	utMetadataExtension byte = 1  // 1...255, not 0
+	msgExtended         byte = 20        // extension message
+	extMsgHandshake     byte = 0         // extension handshake
+	utMetadataExtension byte = 1         // 1...255, not 0
+	metadataPieceSize   int  = 16 * 1024 // 16 KiB
 )
 
 // SendExtensionHandshake sends a handshake to the peer in order to make it known that
@@ -95,21 +96,9 @@ func ReceiveExtensionHandshake(r io.Reader) (byte, error) {
 			return 0, fmt.Errorf("extension 'm' value is not a dictionary, got %T", mVal)
 		}
 
-		utVal, ok := mDict["ut_metadata"]
-		if !ok {
-			return 0, fmt.Errorf("extension handshake missing 'ut_metadata' entry")
-		}
-
-		var id64 int64
-		switch v := utVal.(type) {
-		case int64:
-			id64 = v
-		case int:
-			id64 = int64(v)
-		case float64:
-			id64 = int64(v)
-		default:
-			return 0, fmt.Errorf("ut_metadata id has unexpected type %T", utVal)
+		id64, err := getInt(mDict, "ut_metadata")
+		if err != nil {
+			return 0, err
 		}
 
 		if id64 < 1 || id64 > 255 {
@@ -117,5 +106,207 @@ func ReceiveExtensionHandshake(r io.Reader) (byte, error) {
 		}
 
 		return byte(id64), nil
+	}
+}
+
+// SendMetadataRequest sends a metadata request (msg_type = 0, piece = 0)
+// using the peer's ut_metadata extension ID.
+func SendMetadataRequest(w io.Writer, peerUtMetadataID byte, piece int) error {
+	if peerUtMetadataID == 0 {
+		return fmt.Errorf("invalid ut_metadata extension id: 0")
+	}
+	if piece < 0 {
+		return fmt.Errorf("invalid metadata piece index: %d", piece)
+	}
+
+	// {"msg_type": 0, "piece": <piece>}
+	payloadDict := map[string]interface{}{
+		"msg_type": int64(0), // request
+		"piece":    int64(piece),
+	}
+
+	benc, err := bencode.Encode(payloadDict)
+	if err != nil {
+		return fmt.Errorf("failed to bencode metadata request: %w", err)
+	}
+
+	payload := append([]byte{peerUtMetadataID}, []byte(benc)...)
+
+	msg := Message{
+		ID:      msgExtended,
+		Payload: payload,
+	}
+
+	return writeMessage(w, msg)
+}
+
+func FetchMetadata(rw io.ReadWriter, peerUtMetadataID byte) ([]byte, error) {
+	if peerUtMetadataID == 0 {
+		return nil, fmt.Errorf("invalid ut_metadata extension id: 0")
+	}
+
+	// First, request piece 0 since we dont know total_size yet
+	if err := SendMetadataRequest(rw, peerUtMetadataID, 0); err != nil {
+		return nil, fmt.Errorf("failed to send metadata request for piece 0: %w", err)
+	}
+
+	// We'll fill this map with received pieces
+	pieces := make(map[int][]byte)
+
+	totalSize := -1 // from total_size field
+	numPieces := -1 // derived from totalSize
+	gotPieces := 0  // number of distinct pieces we have
+
+	for {
+		msg, err := readMessage(rw)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read message while fetching metadata: %w", err)
+		}
+
+		if msg == nil {
+			continue
+		}
+
+		// Ignore non-extended messages.
+		if msg.ID != msgExtended {
+			continue
+		}
+
+		if len(msg.Payload) < 2 {
+			// Need at least [ext_id][bencoded dict...]
+			continue
+		}
+
+		extID := msg.Payload[0]
+		if extID != utMetadataExtension {
+			// Some other extension message, ignore.
+			continue
+		}
+
+		buf := msg.Payload[1:]
+		rootVal, consumed, err := bencode.DecodeBytes(buf)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode metadata header dict: %w", err)
+		}
+		if consumed <= 0 || consumed > len(buf) {
+			return nil, fmt.Errorf("invalid consumed length from metadata dict: %d", consumed)
+		}
+
+		root, ok := rootVal.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("metadata header is not a dictionary, got %T", rootVal)
+		}
+
+		msgType, err := getInt(root, "msg_type")
+		if err != nil {
+			return nil, err
+		}
+		pieceIdx64, err := getInt(root, "piece")
+		if err != nil {
+			return nil, err
+		}
+		pieceIdx := int(pieceIdx64)
+
+		totalSize64, err := getInt(root, "total_size")
+		if err != nil {
+			return nil, err
+		}
+		if totalSize64 <= 0 {
+			return nil, fmt.Errorf("invalid total_size in metadata header: %d", totalSize64)
+		}
+
+		switch msgType {
+		case 0:
+			// "request" (we shouldn't see this from a peer in this scenario)
+			continue
+		case 1:
+			// "data", this is what we want
+		case 2:
+			// "reject"
+			return nil, fmt.Errorf("metadata request for piece %d was rejected by peer", pieceIdx)
+		default:
+			// Unknown msg_type, ignore
+			continue
+		}
+
+		// Initialize global size and piece count from first valid data message
+		if totalSize == -1 {
+			totalSize = int(totalSize64)
+			numPieces = (totalSize + metadataPieceSize - 1) / metadataPieceSize
+
+			// Request remaining pieces (1...numPieces-1)
+			for i := 1; i < numPieces; i++ {
+				if err := SendMetadataRequest(rw, peerUtMetadataID, i); err != nil {
+					return nil, fmt.Errorf("failed to request metadata piece %d: %w", i, err)
+				}
+			}
+		}
+
+		if pieceIdx < 0 || pieceIdx >= numPieces {
+			continue // out of range, ignore
+		}
+
+		// Extract this piece's bytes
+		data := buf[consumed:]
+		if len(data) == 0 {
+			continue
+		}
+
+		if _, exists := pieces[pieceIdx]; !exists {
+			// Make a copy so we don't alias the original buffer
+			cp := make([]byte, len(data))
+			copy(cp, data)
+			pieces[pieceIdx] = cp
+			gotPieces++
+		} // Otherwise it's a duplicate, ignore
+
+		// Check if we have every piece
+		if numPieces > 0 && gotPieces == numPieces {
+			break
+		}
+	}
+
+	if totalSize <= 0 || numPieces <= 0 {
+		return nil, fmt.Errorf("did not obtain valid metadata size")
+	}
+
+	// Reassemble the full metadata buffer in the correct order
+	full := make([]byte, totalSize)
+	for i := 0; i < numPieces; i++ {
+		chunk, ok := pieces[i]
+		if !ok {
+			return nil, fmt.Errorf("missing metadata piece %d", i)
+		}
+		offset := i * metadataPieceSize
+		if offset >= len(full) {
+			return nil, fmt.Errorf("piece %d offset %d out of bounds", i, offset)
+		}
+
+		// Last piece may be shorter
+		maxCopy := len(full) - offset
+		if len(chunk) > maxCopy {
+			chunk = chunk[:maxCopy]
+		}
+		copy(full[offset:offset+len(chunk)], chunk)
+	}
+
+	return full, nil
+}
+
+// getInt helper carefully extracts an integer type from a map with string keys
+func getInt(m map[string]interface{}, key string) (int64, error) {
+	v, ok := m[key]
+	if !ok {
+		return 0, fmt.Errorf("metadata header missing key %q", key)
+	}
+	switch x := v.(type) {
+	case int64:
+		return x, nil
+	case int:
+		return int64(x), nil
+	case float64:
+		return int64(x), nil
+	default:
+		return 0, fmt.Errorf("metadata header %q has unexpected type %T", key, v)
 	}
 }
