@@ -9,16 +9,21 @@ import (
 )
 
 type Magnet struct {
-	InfoHashHex string
-	TrackerUrl  string
+	InfoHashHex string   // Hex-encoded info hash
+	InfoHash    [20]byte // Binary info hash
+	DisplayName string   // Display name (dn parameter)
+	Trackers    []string // List of tracker URLs
+	Length      int64    // Exact length in bytes (xl parameter)
 }
 
-// Parse parses a magnet URI and extracts the info hash and tracker URL.
+// Parse parses a magnet URI and extracts information.
 //
 // It expects:
 //   - scheme: magnet
 //   - xt parameter: urn:btih:<hash> (hash can be hex or base32)
-//   - tr parameter: tracker URL (first one is used)
+//   - tr parameter: tracker URL (can appear multiple times)
+//   - dn parameter: display name (optional)
+//   - xl parameter: exact length in bytes (optional)
 func Parse(raw string) (*Magnet, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -76,14 +81,34 @@ func Parse(raw string) (*Magnet, error) {
 		return nil, fmt.Errorf("magnet URI missing valid xt=urn:btih:<hash> parameter")
 	}
 
-	tr := q.Get("tr")
-	if tr == "" {
-		return nil, fmt.Errorf("magnet URI missing tr (tracker) parameter")
+	// Convert hex string to binary hash
+	var infoHash [20]byte
+	hashBytes, err := hex.DecodeString(infoHashHex)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode info hash: %w", err)
+	}
+	copy(infoHash[:], hashBytes)
+
+	// Parse trackers (tr parameter, can appear multiple times)
+	trackers := q["tr"]
+
+	// Parse display name (dn parameter)
+	displayName := q.Get("dn")
+
+	// Parse exact length (xl parameter)
+	var length int64
+	if xlStr := q.Get("xl"); xlStr != "" {
+		if parsedLen, err := fmt.Sscanf(xlStr, "%d", &length); err == nil && parsedLen == 1 {
+			// Successfully parsed length
+		}
 	}
 
 	return &Magnet{
 		InfoHashHex: infoHashHex,
-		TrackerUrl:  tr,
+		InfoHash:    infoHash,
+		DisplayName: displayName,
+		Trackers:    trackers,
+		Length:      length,
 	}, nil
 }
 

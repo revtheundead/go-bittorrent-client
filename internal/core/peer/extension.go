@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/revtheundead/go-bittorrent-client/pkg/bencode"
+	"github.com/revtheundead/revtorrent/internal/protocol/bencode"
 )
 
 const (

@@ -1,0 +1,27 @@
+# revTorrent Configuration
+
+# Download settings
+download_path: "./downloads"  # Where to save downloaded files
+
+# Network settings
+listen_port: 6881            # Port to listen on for incoming connections
+max_peers: 50                # Maximum number of peers to connect to per torrent
+max_connections: 200         # Maximum total connections across all torrents
+
+# Rate limiting (bytes per second, 0 = unlimited)
+upload_rate: 0               # Upload speed limit (0 = unlimited)
+download_rate: 0             # Download speed limit (0 = unlimited)
+
+# Protocol features
+dht_enabled: true            # Enable DHT for trackerless peer discovery
+pex_enabled: true            # Enable Peer Exchange
+
+# Seeding settings
+seed: true                   # Continue seeding after download completes
+seed_ratio: 1.0              # Seed until this upload/download ratio is reached
+
+# State management
+state_dir: "./.revtorrent"   # Directory for resume data and state files
+
+# Logging
+log_level: "info"            # Logging level: debug, info, warn, error

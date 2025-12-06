@@ -1,3 +1,7 @@
+/*
+* THIS IS THE LEGACY DOWNLOAD LOGIC, IT NEEDS TO BE REMOVED/REWORKED
+ */
+
 package downloader
 
 import (
@@ -7,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/revtheundead/go-bittorrent-client/internal/peer"
-	"github.com/revtheundead/go-bittorrent-client/internal/torrent"
-	"github.com/revtheundead/go-bittorrent-client/internal/tracker"
+	"github.com/revtheundead/revtorrent/internal/peer"
+	"github.com/revtheundead/revtorrent/internal/torrent"
+	"github.com/revtheundead/revtorrent/internal/tracker"
 )
 
 const (

@@ -10,13 +10,13 @@ import (
 	"net/url"
 	"strconv"
 
-	"github.com/revtheundead/go-bittorrent-client/internal/torrent"
-	"github.com/revtheundead/go-bittorrent-client/pkg/bencode"
+	"github.com/revtheundead/revtorrent/internal/core/torrent"
+	"github.com/revtheundead/revtorrent/internal/protocol/bencode"
 )
 
 const (
 	peerIDSize           = 20                // 20 bytes per BitTorrent spec
-	peerIDPrefix         = "-GT0001-"        // 8-byte client ID prefix
+	peerIDPrefix         = "-RT0001-"        // 8-byte revTorrent client ID prefix
 	peerIDPrefixSize     = len(peerIDPrefix) // 8 bytes
 	clientPort           = 6881              // operating port number
 	compactPeerEntrySize = 6                 // 4 bytes IP + 2 bytes port
@@ -32,6 +32,8 @@ type Peer struct {
 type TrackerResponse struct {
 	Interval int64
 	Peers    []Peer
+	Seeders  int // Optional: number of seeders
+	Leechers int // Optional: number of leechers
 }
 
 // GeneratePeerID returns a random 20-byte peer ID for this client
