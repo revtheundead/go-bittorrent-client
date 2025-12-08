@@ -11,20 +11,20 @@ import (
 
 // ResumeData holds the state needed to resume a download
 type ResumeData struct {
-	InfoHash        string    `json:"info_hash"`
-	Name            string    `json:"name"`
-	TotalSize       int64     `json:"total_size"`
-	PieceLength     int64     `json:"piece_length"`
-	NumPieces       int       `json:"num_pieces"`
-	CompletedPieces []int     `json:"completed_pieces"`
-	Bitfield        []byte    `json:"bitfield"`
-	DownloadedBytes int64     `json:"downloaded_bytes"`
-	UploadedBytes   int64     `json:"uploaded_bytes"`
-	SavePath        string    `json:"save_path"`
-	AddedAt         time.Time `json:"added_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	InfoHash        string     `json:"info_hash"`
+	Name            string     `json:"name"`
+	TotalSize       int64      `json:"total_size"`
+	PieceLength     int64      `json:"piece_length"`
+	NumPieces       int        `json:"num_pieces"`
+	CompletedPieces []int      `json:"completed_pieces"`
+	Bitfield        []byte     `json:"bitfield"`
+	DownloadedBytes int64      `json:"downloaded_bytes"`
+	UploadedBytes   int64      `json:"uploaded_bytes"`
+	SavePath        string     `json:"save_path"`
+	AddedAt         time.Time  `json:"added_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
 	CompletedAt     *time.Time `json:"completed_at,omitempty"`
-	IsComplete      bool      `json:"is_complete"`
+	IsComplete      bool       `json:"is_complete"`
 }
 
 // ResumeManager manages resume data for torrents
@@ -174,12 +174,12 @@ func CreateResumeData(infoHash string, name string, storage *FileStorage) *Resum
 		DownloadedBytes: downloadedBytes,
 		// UploadedBytes: Upload tracking will be implemented in the engine layer
 		// which coordinates between storage and uploader components
-		UploadedBytes:   0,
-		SavePath:        storage.basePath,
-		AddedAt:         time.Now(),
-		UpdatedAt:       time.Now(),
-		CompletedAt:     completedAt,
-		IsComplete:      isComplete,
+		UploadedBytes: 0,
+		SavePath:      storage.basePath,
+		AddedAt:       time.Now(),
+		UpdatedAt:     time.Now(),
+		CompletedAt:   completedAt,
+		IsComplete:    isComplete,
 	}
 }
 

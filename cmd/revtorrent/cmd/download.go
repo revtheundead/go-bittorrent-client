@@ -6,8 +6,10 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
@@ -23,6 +25,7 @@ var (
 	seedAfter    bool
 	seedRatio    float64
 	noDHT        bool
+	noProgress   bool
 )
 
 // downloadCmd represents the download command
@@ -51,6 +54,7 @@ func init() {
 	downloadCmd.Flags().BoolVar(&seedAfter, "seed", true, "continue seeding after download completes")
 	downloadCmd.Flags().Float64Var(&seedRatio, "seed-ratio", 1.0, "seed until this upload/download ratio (0=seed forever)")
 	downloadCmd.Flags().BoolVar(&noDHT, "no-dht", false, "disable DHT")
+	downloadCmd.Flags().BoolVar(&noProgress, "no-progress", false, "disable progress bar (show logs instead)")
 
 	// Bind flags to viper
 	viper.BindPFlag("download_path", downloadCmd.Flags().Lookup("output"))
@@ -64,13 +68,24 @@ func init() {
 func runDownload(cmd *cobra.Command, args []string) error {
 	source := args[0]
 
-	// Create logger
-	logger := createLogger()
+	// Show progress bar if not in debug mode AND not disabled with --no-progress
+	showProgressBar := logLevel != "debug" && !noProgress
 
-	logger.Info("starting download",
-		"source", source,
-		"output", outputDir,
-		"max_peers", maxPeers)
+	// Create logger (suppress INFO logs when showing progress bar)
+	var logger *slog.Logger
+	if showProgressBar {
+		// In progress bar mode, only show WARN and above
+		opts := &slog.HandlerOptions{Level: slog.LevelWarn}
+		handler := slog.NewTextHandler(os.Stdout, opts)
+		logger = slog.New(handler)
+	} else {
+		// In debug/no-progress mode, use the configured log level
+		logger = createLogger()
+		logger.Info("starting download",
+			"source", source,
+			"output", outputDir,
+			"max_peers", maxPeers)
+	}
 
 	// Create client configuration
 	cfg := config.Default()
@@ -79,7 +94,12 @@ func runDownload(cmd *cobra.Command, args []string) error {
 	cfg.DHTEnabled = !noDHT
 	cfg.Seed = seedAfter
 	cfg.SeedRatio = seedRatio
-	cfg.LogLevel = logLevel
+	// Set log level to warn when showing progress bar, otherwise use configured level
+	if showProgressBar {
+		cfg.LogLevel = "warn"
+	} else {
+		cfg.LogLevel = logLevel
+	}
 	cfg.ListenPort = port
 
 	// Create client
@@ -88,11 +108,21 @@ func runDownload(cmd *cobra.Command, args []string) error {
 		bittorrent.WithPort(port),
 		bittorrent.WithDHT(!noDHT),
 		bittorrent.WithRateLimit(downloadRate, uploadRate),
+		bittorrent.WithLogLevel(cfg.LogLevel),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create client: %w", err)
 	}
 	defer client.Stop()
+
+	// Show initial progress bar
+	if showProgressBar {
+		if isMagnetLink(source) {
+			fmt.Printf("⚡ Fetching metadata...\n")
+		} else {
+			fmt.Printf("⚡ Loading torrent...\n")
+		}
+	}
 
 	// Add torrent
 	var torrent *bittorrent.Torrent
@@ -131,49 +161,97 @@ func runDownload(cmd *cobra.Command, args []string) error {
 		torrent.Stop()
 	}()
 
+	// Track last progress bar line for clearing
+	var lastLine string
+
 	// Monitor progress
 	for {
 		select {
 		case <-ctx.Done():
+			if showProgressBar && lastLine != "" {
+				fmt.Print("\n") // Final newline
+			}
 			return nil
 
 		case event := <-torrent.Events():
 			switch event.Type {
 			case bittorrent.EventStarted:
-				logger.Info("download started")
+				if showProgressBar {
+					fmt.Printf("⚡ Starting download: %s\n", torrent.Name())
+				} else {
+					logger.Info("download started")
+				}
 
 			case bittorrent.EventProgress:
 				stats := torrent.Stats()
-				logger.Info("progress",
-					"percent", fmt.Sprintf("%.1f%%", event.Progress*100),
-					"downloaded", formatBytes(stats.Downloaded),
-					"uploaded", formatBytes(stats.Uploaded),
-					"download_rate", formatBytes(int64(stats.DownloadRate))+"/s",
-					"upload_rate", formatBytes(int64(stats.UploadRate))+"/s",
-					"peers", stats.Peers)
+				if showProgressBar {
+					// Determine status message
+					statusMsg := ""
+					if stats.Peers == 0 {
+						statusMsg = "Connecting to peers..."
+					} else if stats.DownloadRate < 1024 && event.Progress < 0.01 {
+						statusMsg = "Starting download..."
+					}
+					lastLine = renderProgressBar(torrent.Name(), event.Progress, stats, false, torrent.State().String(), statusMsg)
+					fmt.Print("\r" + lastLine)
+				} else {
+					logger.Info("progress",
+						"percent", fmt.Sprintf("%.1f%%", event.Progress*100),
+						"downloaded", formatBytes(stats.Downloaded),
+						"uploaded", formatBytes(stats.Uploaded),
+						"download_rate", formatBytes(int64(stats.DownloadRate))+"/s",
+						"upload_rate", formatBytes(int64(stats.UploadRate))+"/s",
+						"peers", stats.Peers)
+				}
 
 			case bittorrent.EventComplete:
-				logger.Info("download complete!")
+				if showProgressBar {
+					fmt.Print("\r" + strings.Repeat(" ", 120) + "\r") // Clear line
+					fmt.Printf("✓ Download complete!\n")
+				} else {
+					logger.Info("download complete!")
+				}
 				if !seedAfter {
 					return nil
 				}
-				logger.Info("seeding started", "ratio_target", seedRatio)
+				if showProgressBar {
+					fmt.Printf("🌱 Seeding (target ratio: %.2f)\n", seedRatio)
+				} else {
+					logger.Info("seeding started", "ratio_target", seedRatio)
+				}
 
 			case bittorrent.EventSeeding:
 				stats := torrent.Stats()
 				ratio := float64(stats.Uploaded) / float64(stats.Downloaded)
-				logger.Info("seeding",
-					"uploaded", formatBytes(stats.Uploaded),
-					"ratio", fmt.Sprintf("%.2f", ratio),
-					"peers", stats.Peers)
+				if showProgressBar {
+					statusMsg := ""
+					if stats.Peers == 0 {
+						statusMsg = "Waiting for peers..."
+					}
+					lastLine = renderProgressBar(torrent.Name(), 1.0, stats, true, torrent.State().String(), statusMsg)
+					fmt.Print("\r" + lastLine)
+				} else {
+					logger.Info("seeding",
+						"uploaded", formatBytes(stats.Uploaded),
+						"ratio", fmt.Sprintf("%.2f", ratio),
+						"peers", stats.Peers)
+				}
 
 				if seedRatio > 0 && ratio >= seedRatio {
-					logger.Info("seed ratio reached, stopping",
-						"ratio", fmt.Sprintf("%.2f", ratio))
+					if showProgressBar {
+						fmt.Print("\r" + strings.Repeat(" ", 120) + "\r") // Clear line
+						fmt.Printf("✓ Seed ratio reached (%.2f)\n", ratio)
+					} else {
+						logger.Info("seed ratio reached, stopping",
+							"ratio", fmt.Sprintf("%.2f", ratio))
+					}
 					return nil
 				}
 
 			case bittorrent.EventError:
+				if showProgressBar {
+					fmt.Print("\r" + strings.Repeat(" ", 120) + "\r") // Clear line
+				}
 				return fmt.Errorf("download error: %w", event.Error)
 			}
 		}
@@ -221,4 +299,96 @@ func formatBytes(bytes int64) string {
 
 	units := []string{"KB", "MB", "GB", "TB"}
 	return fmt.Sprintf("%.1f %s", float64(bytes)/float64(div), units[exp])
+}
+
+func formatRate(bytesPerSec float64) string {
+	const unit = 1024
+	if bytesPerSec < unit {
+		return fmt.Sprintf("%.0f B/s", bytesPerSec)
+	}
+
+	div, exp := float64(unit), 0
+	for n := bytesPerSec / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+
+	units := []string{"KB/s", "MB/s", "GB/s"}
+	return fmt.Sprintf("%.1f %s", bytesPerSec/div, units[exp])
+}
+
+func renderProgressBar(name string, progress float64, stats bittorrent.Stats, seeding bool, state string, statusMsg string) string {
+	// Style definitions
+	downloadColor := lipgloss.NewStyle().Foreground(lipgloss.Color("#00FF00")).Bold(true)
+	seedingColor := lipgloss.NewStyle().Foreground(lipgloss.Color("#00BFFF")).Bold(true)
+	pausedColor := lipgloss.NewStyle().Foreground(lipgloss.Color("#888888"))
+	infoColor := lipgloss.NewStyle().Foreground(lipgloss.Color("#AAAAAA"))
+	statusColor := lipgloss.NewStyle().Foreground(lipgloss.Color("#FFAA00"))
+
+	// Progress bar
+	barWidth := 30
+	filled := int(progress * float64(barWidth))
+	if filled > barWidth {
+		filled = barWidth
+	}
+	emptyWidth := barWidth - filled
+
+	var bar string
+	var statusStyle lipgloss.Style
+	var statusText string
+
+	if seeding {
+		statusStyle = seedingColor
+		statusText = "SEEDING"
+		bar = strings.Repeat("█", filled) + strings.Repeat("░", emptyWidth)
+	} else if state == "Paused" {
+		statusStyle = pausedColor
+		statusText = "PAUSED"
+		bar = strings.Repeat("▓", filled) + strings.Repeat("░", emptyWidth)
+	} else {
+		statusStyle = downloadColor
+		statusText = "DOWNLOADING"
+		bar = strings.Repeat("█", filled) + strings.Repeat("░", emptyWidth)
+	}
+
+	// Format stats
+	percent := fmt.Sprintf("%.1f%%", progress*100)
+	downloadSpeed := formatRate(stats.DownloadRate)
+	uploadSpeed := formatRate(stats.UploadRate)
+
+	// Fix: use singular "peer" when count is 1
+	var peerText string
+	if stats.Peers == 1 {
+		peerText = "1 peer"
+	} else {
+		peerText = fmt.Sprintf("%d peers", stats.Peers)
+	}
+
+	// Ratio (only if seeding)
+	var ratioStr string
+	if seeding && stats.Downloaded > 0 {
+		ratio := float64(stats.Uploaded) / float64(stats.Downloaded)
+		ratioStr = fmt.Sprintf(" | Ratio: %.2f", ratio)
+	}
+
+	// Compose the progress line
+	status := statusStyle.Render(statusText)
+	barStr := statusStyle.Render(bar)
+	info := infoColor.Render(fmt.Sprintf("%s | ↓ %s ↑ %s | %s%s",
+		percent, downloadSpeed, uploadSpeed, peerText, ratioStr))
+
+	// Add status message if provided
+	statusLine := ""
+	if statusMsg != "" {
+		statusLine = " " + statusColor.Render(statusMsg)
+	}
+
+	line := fmt.Sprintf("%s [%s] %s%s", status, barStr, info, statusLine)
+
+	// Pad with spaces to clear any previous content (up to 120 chars)
+	if len(line) < 120 {
+		line += strings.Repeat(" ", 120-len(line))
+	}
+
+	return line
 }

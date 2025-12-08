@@ -196,6 +196,50 @@ func Parse(data []byte) (*Metainfo, error) {
 	return metainfo, nil
 }
 
+// ParseInfo parses raw metadata bytes (info dictionary) from a magnet link (BEP 9)
+// and creates a Metainfo struct. It verifies the info hash matches the expected value.
+func ParseInfo(metadataBytes []byte, expectedInfoHash [20]byte) (*Metainfo, error) {
+	// Decode the bencoded info dictionary
+	value, err := bencode.Decode(string(metadataBytes))
+	if err != nil {
+		return nil, fmt.Errorf("bencode decode failed: %w", err)
+	}
+
+	infoDict, ok := value.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("metadata must be a dictionary, got %T", value)
+	}
+
+	// Re-encode to verify the info hash
+	encodedInfo, err := bencode.Encode(infoDict)
+	if err != nil {
+		return nil, fmt.Errorf("failed to re-encode info dictionary: %w", err)
+	}
+
+	// Compute SHA-1 and verify
+	sum := sha1.Sum([]byte(encodedInfo))
+	if sum != expectedInfoHash {
+		return nil, fmt.Errorf("info hash mismatch: expected %x, got %x", expectedInfoHash, sum)
+	}
+
+	// Parse the info dictionary
+	info, err := parseInfo(infoDict)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create Metainfo with the info and hash
+	metainfo := &Metainfo{
+		Announce:     "", // Will be set from magnet link trackers
+		Info:         *info,
+		InfoHash:     sum,
+		InfoHashHex:  hex.EncodeToString(sum[:]),
+		AnnounceList: nil, // Will be set from magnet link trackers
+	}
+
+	return metainfo, nil
+}
+
 // parseInfo parses the 'info' dictionary
 func parseInfo(infoDict map[string]interface{}) (*Info, error) {
 	var info Info
@@ -322,10 +366,4 @@ func parseInfo(infoDict map[string]interface{}) (*Info, error) {
 	}
 
 	return &info, nil
-}
-
-// ParseSingleFile is deprecated. Use Parse instead.
-// Kept for backward compatibility.
-func ParseSingleFile(data []byte) (*Metainfo, error) {
-	return Parse(data)
 }

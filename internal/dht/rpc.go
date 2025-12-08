@@ -26,12 +26,12 @@ const (
 
 // Message represents a DHT message
 type Message struct {
-	Type         string                 // "q", "r", or "e"
-	TransactionID string                // Transaction ID
-	Query        string                 // Query type (for queries)
-	Args         map[string]interface{} // Query arguments
-	Response     map[string]interface{} // Response data
-	Error        []interface{}          // Error info
+	Type          string                 // "q", "r", or "e"
+	TransactionID string                 // Transaction ID
+	Query         string                 // Query type (for queries)
+	Args          map[string]interface{} // Query arguments
+	Response      map[string]interface{} // Response data
+	Error         []interface{}          // Error info
 
 	// Parsed response fields
 	Nodes []Node

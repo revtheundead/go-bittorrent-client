@@ -85,15 +85,25 @@ func (t *Torrent) State() TorrentState {
 }
 
 func convertSessionState(session *engine.Session) TorrentState {
-	// This is a simple conversion - you may need to adjust based on actual session state
-	progress := session.Progress()
-	if progress >= 1.0 {
+	// Get the actual state from session
+	sessionState := session.State()
+
+	switch sessionState {
+	case engine.StateStopped:
+		return StateStopped
+	case engine.StateDownloading:
+		return StateDownloading
+	case engine.StateSeeding:
 		return StateSeeding
-	}
-	if progress > 0 {
+	case engine.StatePaused:
+		return StatePaused
+	case engine.StateChecking:
+		return StateChecking
+	case engine.StateError:
+		return StateError
+	default:
 		return StateDownloading
 	}
-	return StateChecking
 }
 
 // Start begins downloading the torrent
@@ -146,8 +156,16 @@ func (t *Torrent) WaitForCompletion() error {
 
 // VerifyData verifies all downloaded pieces
 func (t *Torrent) VerifyData() error {
-	// TODO: Add verification method to session
-	return fmt.Errorf("not yet implemented")
+	verified, failed, err := t.session.VerifyData()
+	if err != nil {
+		return fmt.Errorf("verification failed: %w", err)
+	}
+
+	if failed > 0 {
+		return fmt.Errorf("verification found %d corrupted pieces (verified: %d)", failed, verified)
+	}
+
+	return nil
 }
 
 // Files returns information about the files in this torrent

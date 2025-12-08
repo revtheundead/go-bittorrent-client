@@ -5,28 +5,28 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbletea"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/revtheundead/revtorrent/pkg/bittorrent"
 )
 
 const (
-	progressBarWidth  = 40
-	updateInterval    = 200 * time.Millisecond
+	progressBarWidth = 40
+	updateInterval   = 200 * time.Millisecond
 )
 
 // Model represents the bubbletea model for download progress
 type Model struct {
-	torrent       *bittorrent.Torrent
-	stats         bittorrent.Stats
-	progress      float64
-	lastUpdate    time.Time
-	startTime     time.Time
-	quitting      bool
-	err           error
-	width         int
-	height        int
+	torrent    *bittorrent.Torrent
+	stats      bittorrent.Stats
+	progress   float64
+	lastUpdate time.Time
+	startTime  time.Time
+	quitting   bool
+	err        error
+	width      int
+	height     int
 }
 
 // NewModel creates a new TUI model for a torrent

@@ -120,7 +120,8 @@ func (t *UDPTracker) Announce(req *AnnounceRequest) (*TrackerResponse, error) {
 		return nil, fmt.Errorf("failed to send announce: %w", err)
 	}
 
-	respBuf := make([]byte, 1024)
+	// Max safe UDP packet size is ~64 KiB.
+	respBuf := make([]byte, 64*1024)
 	t.conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 
 	n, err := t.conn.Read(respBuf)

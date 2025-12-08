@@ -8,14 +8,12 @@ import (
 )
 
 const (
-	msgExtended         byte = 20        // extension message
 	extMsgHandshake     byte = 0         // extension handshake
 	utMetadataExtension byte = 1         // 1...255, not 0
 	metadataPieceSize   int  = 16 * 1024 // 16 KiB
 )
 
-// SendExtensionHandshake sends a handshake to the peer in order to make it known that
-// our client supports extensions
+// SendExtensionHandshake sends a handshake to the peer to indicate extension support
 func SendExtensionHandshake(w io.Writer) error {
 	// {"m": {"ut_metadata": 1}}
 	payloadDict := map[string]interface{}{
@@ -33,22 +31,18 @@ func SendExtensionHandshake(w io.Writer) error {
 	payload := append([]byte{extMsgHandshake}, []byte(benc)...)
 
 	msg := Message{
-		ID:      msgExtended,
+		ID:      MsgExtended,
 		Payload: payload,
 	}
 
-	return writeMessage(w, msg)
+	return WriteMessage(w, msg)
 }
 
-// ReceiveExtensionHandshake reads messages from r until it finds
-// an extension handshake message, then extracts and returns the
-// peer's ut_metadata extension ID.
-//
-// It returns an error if the message is malformed or ut_metadata
-// is missing / invalid.
+// ReceiveExtensionHandshake reads messages until it finds an extension handshake,
+// then extracts and returns the peer's ut_metadata extension ID.
 func ReceiveExtensionHandshake(r io.Reader) (byte, error) {
 	for {
-		msg, err := readMessage(r)
+		msg, err := ReadMessage(r)
 		if err != nil {
 			return 0, fmt.Errorf("failed to read message while waiting for extension handshake: %w", err)
 		}
@@ -57,13 +51,13 @@ func ReceiveExtensionHandshake(r io.Reader) (byte, error) {
 		}
 
 		// We only care about extended messages (ID = 20)
-		if msg.ID != msgExtended {
+		if msg.ID != MsgExtended {
 			// Ignore keep-alives, bitfield, choke/unchoke, etc.
 			continue
 		}
 
 		if len(msg.Payload) < 1 {
-			// Malformed extended message, not the handshake
+			// Malformed extended message
 			continue
 		}
 
@@ -73,7 +67,7 @@ func ReceiveExtensionHandshake(r io.Reader) (byte, error) {
 			continue
 		}
 
-		// Now msg.Payload[1:] should be the bencoded dict {"m": {"ut_metadata": <id>}}
+		// msg.Payload[1:] should be the bencoded dict {"m": {"ut_metadata": <id>}}
 		dictBytes := msg.Payload[1:]
 
 		rootVal, err := bencode.Decode(string(dictBytes))
@@ -109,7 +103,7 @@ func ReceiveExtensionHandshake(r io.Reader) (byte, error) {
 	}
 }
 
-// SendMetadataRequest sends a metadata request (msg_type = 0, piece = 0)
+// SendMetadataRequest sends a metadata request (msg_type = 0) for the specified piece
 // using the peer's ut_metadata extension ID.
 func SendMetadataRequest(w io.Writer, peerUtMetadataID byte, piece int) error {
 	if peerUtMetadataID == 0 {
@@ -133,24 +127,25 @@ func SendMetadataRequest(w io.Writer, peerUtMetadataID byte, piece int) error {
 	payload := append([]byte{peerUtMetadataID}, []byte(benc)...)
 
 	msg := Message{
-		ID:      msgExtended,
+		ID:      MsgExtended,
 		Payload: payload,
 	}
 
-	return writeMessage(w, msg)
+	return WriteMessage(w, msg)
 }
 
+// FetchMetadata fetches the complete metadata from a peer using BEP 9
 func FetchMetadata(rw io.ReadWriter, peerUtMetadataID byte) ([]byte, error) {
 	if peerUtMetadataID == 0 {
 		return nil, fmt.Errorf("invalid ut_metadata extension id: 0")
 	}
 
-	// First, request piece 0 since we dont know total_size yet
+	// First, request piece 0 since we don't know total_size yet
 	if err := SendMetadataRequest(rw, peerUtMetadataID, 0); err != nil {
 		return nil, fmt.Errorf("failed to send metadata request for piece 0: %w", err)
 	}
 
-	// We'll fill this map with received pieces
+	// Map to collect received pieces
 	pieces := make(map[int][]byte)
 
 	totalSize := -1 // from total_size field
@@ -158,7 +153,7 @@ func FetchMetadata(rw io.ReadWriter, peerUtMetadataID byte) ([]byte, error) {
 	gotPieces := 0  // number of distinct pieces we have
 
 	for {
-		msg, err := readMessage(rw)
+		msg, err := ReadMessage(rw)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read message while fetching metadata: %w", err)
 		}
@@ -167,8 +162,8 @@ func FetchMetadata(rw io.ReadWriter, peerUtMetadataID byte) ([]byte, error) {
 			continue
 		}
 
-		// Ignore non-extended messages.
-		if msg.ID != msgExtended {
+		// Ignore non-extended messages
+		if msg.ID != MsgExtended {
 			continue
 		}
 
@@ -179,7 +174,7 @@ func FetchMetadata(rw io.ReadWriter, peerUtMetadataID byte) ([]byte, error) {
 
 		extID := msg.Payload[0]
 		if extID != utMetadataExtension {
-			// Some other extension message, ignore.
+			// Some other extension message
 			continue
 		}
 
@@ -225,7 +220,7 @@ func FetchMetadata(rw io.ReadWriter, peerUtMetadataID byte) ([]byte, error) {
 			// "reject"
 			return nil, fmt.Errorf("metadata request for piece %d was rejected by peer", pieceIdx)
 		default:
-			// Unknown msg_type, ignore
+			// Unknown msg_type
 			continue
 		}
 
@@ -243,7 +238,7 @@ func FetchMetadata(rw io.ReadWriter, peerUtMetadataID byte) ([]byte, error) {
 		}
 
 		if pieceIdx < 0 || pieceIdx >= numPieces {
-			continue // out of range, ignore
+			continue // out of range
 		}
 
 		// Extract this piece's bytes
@@ -253,12 +248,12 @@ func FetchMetadata(rw io.ReadWriter, peerUtMetadataID byte) ([]byte, error) {
 		}
 
 		if _, exists := pieces[pieceIdx]; !exists {
-			// Make a copy so we don't alias the original buffer
+			// Make a copy to avoid aliasing
 			cp := make([]byte, len(data))
 			copy(cp, data)
 			pieces[pieceIdx] = cp
 			gotPieces++
-		} // Otherwise it's a duplicate, ignore
+		}
 
 		// Check if we have every piece
 		if numPieces > 0 && gotPieces == numPieces {

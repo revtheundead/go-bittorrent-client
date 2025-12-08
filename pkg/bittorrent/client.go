@@ -1,10 +1,12 @@
 package bittorrent
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/revtheundead/revtorrent/internal/config"
 	"github.com/revtheundead/revtorrent/internal/core/torrent"
@@ -44,9 +46,23 @@ func NewClient(opts ...Option) (*Client, error) {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
 
-	// Create logger
+	// Create logger with configured log level
+	var logLevel slog.Level
+	switch cfg.LogLevel {
+	case "debug":
+		logLevel = slog.LevelDebug
+	case "info":
+		logLevel = slog.LevelInfo
+	case "warn":
+		logLevel = slog.LevelWarn
+	case "error":
+		logLevel = slog.LevelError
+	default:
+		logLevel = slog.LevelInfo
+	}
+
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
+		Level: logLevel,
 	}))
 
 	// Create engine
@@ -98,9 +114,69 @@ func (c *Client) AddMagnet(uri string) (*Torrent, error) {
 	}
 	c.mu.Unlock()
 
-	// TODO: Fetch metadata from DHT/peers using BEP 9
-	// For now, return error - magnet links require metadata fetching
-	return nil, fmt.Errorf("magnet link support requires metadata fetching (BEP 9) - not yet fully implemented")
+	// Fetch metadata from DHT/peers using BEP 9
+	c.logger.Info("fetching metadata for magnet link", "info_hash", infoHashHex)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	metadataBytes, err := c.engine.FetchMetadata(ctx, mag.InfoHash, mag.Trackers)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch metadata: %w", err)
+	}
+
+	c.logger.Info("metadata fetched successfully", "size", len(metadataBytes))
+
+	// Parse the metadata as a torrent info dictionary
+	meta, err := torrent.ParseInfo(metadataBytes, mag.InfoHash)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse metadata: %w", err)
+	}
+
+	// Add trackers from magnet link (skip empty URLs)
+	meta.AnnounceList = make([][]string, 0)
+	for _, tracker := range mag.Trackers {
+		if tracker != "" {
+			meta.AnnounceList = append(meta.AnnounceList, []string{tracker})
+		}
+	}
+
+	// If no trackers available, add default public trackers
+	if len(meta.AnnounceList) == 0 {
+		defaultTrackers := []string{
+			"udp://tracker.opentrackr.org:1337/announce",
+			"udp://open.stealth.si:80/announce",
+			"udp://tracker.torrent.eu.org:451/announce",
+			"udp://tracker.bittor.pw:1337/announce",
+			"udp://public.popcorn-tracker.org:6969/announce",
+		}
+		c.logger.Info("no trackers in metadata, using defaults", "count", len(defaultTrackers))
+		for _, tracker := range defaultTrackers {
+			meta.AnnounceList = append(meta.AnnounceList, []string{tracker})
+		}
+	}
+
+	// Create session
+	session, err := engine.NewSession(meta, c.config, c.logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create session: %w", err)
+	}
+
+	// Add session to engine
+	if err := c.engine.AddSession(session); err != nil {
+		return nil, fmt.Errorf("failed to add session to engine: %w", err)
+	}
+
+	// Wrap in Torrent and store
+	t := newTorrent(session)
+
+	c.mu.Lock()
+	c.torrents[infoHashHex] = t
+	c.mu.Unlock()
+
+	c.logger.Info("magnet link added successfully", "info_hash", infoHashHex, "name", meta.Info.Name)
+
+	return t, nil
 }
 
 // AddTorrentFromBytes adds a torrent from raw .torrent file data
@@ -191,7 +267,21 @@ func (c *Client) RemoveTorrent(infoHash string, deleteFiles bool) error {
 		return fmt.Errorf("failed to remove session from engine: %w", err)
 	}
 
-	// TODO: If deleteFiles is true, remove downloaded files from disk
+	// Delete files if requested
+	if deleteFiles {
+		files, err := t.Files()
+		if err == nil && len(files) > 0 {
+			// Delete each file
+			for _, file := range files {
+				fullPath := fmt.Sprintf("%s/%s", c.config.DownloadPath, file.Path)
+				if err := os.Remove(fullPath); err != nil {
+					c.logger.Warn("failed to delete file", "path", fullPath, "error", err)
+				} else {
+					c.logger.Debug("deleted file", "path", fullPath)
+				}
+			}
+		}
+	}
 
 	c.logger.Info("torrent removed", "info_hash", infoHash)
 	return nil

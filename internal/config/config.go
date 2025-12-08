@@ -11,9 +11,9 @@ type Config struct {
 	DownloadPath string // Where to save downloaded files
 
 	// Network settings
-	ListenPort     int  // Port to listen on for incoming connections
-	MaxPeers       int  // Maximum number of peers to connect to
-	MaxConnections int  // Maximum total connections
+	ListenPort     int // Port to listen on for incoming connections
+	MaxPeers       int // Maximum number of peers to connect to
+	MaxConnections int // Maximum total connections
 
 	// Rate limiting (bytes per second, 0 = unlimited)
 	UploadRate   int64

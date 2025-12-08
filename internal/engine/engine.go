@@ -6,8 +6,10 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/revtheundead/revtorrent/internal/config"
+	"github.com/revtheundead/revtorrent/internal/core/peer"
 	"github.com/revtheundead/revtorrent/internal/dht"
 )
 
@@ -231,8 +233,35 @@ func (e *Engine) handleIncomingConnection(conn net.Conn) {
 	defer e.wg.Done()
 	defer conn.Close()
 
-	// TODO: Implement incoming peer handshake and routing to appropriate session
-	// For now, just close the connection
-	e.logger.Debug("incoming connection (handshake not yet implemented)",
-		"addr", conn.RemoteAddr())
+	// Set read deadline for handshake
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+
+	// Read handshake
+	handshake, err := peer.ReadRemoteHandshake(conn)
+	if err != nil {
+		e.logger.Debug("failed to read handshake from incoming peer",
+			"addr", conn.RemoteAddr(), "error", err)
+		return
+	}
+
+	// Find session by info hash
+	infoHashHex := fmt.Sprintf("%x", handshake.InfoHash)
+	e.sessionsMu.RLock()
+	session, exists := e.sessions[infoHashHex]
+	e.sessionsMu.RUnlock()
+
+	if !exists {
+		e.logger.Debug("no session for incoming peer",
+			"addr", conn.RemoteAddr(), "info_hash", infoHashHex)
+		return
+	}
+
+	// Remove read deadline
+	conn.SetReadDeadline(time.Time{})
+
+	// Let the session handle this peer
+	if err := session.HandleIncomingPeer(conn, handshake); err != nil {
+		e.logger.Warn("failed to handle incoming peer",
+			"addr", conn.RemoteAddr(), "error", err)
+	}
 }

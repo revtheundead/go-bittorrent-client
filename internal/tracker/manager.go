@@ -41,6 +41,12 @@ func NewManager(trackerURLs []string, logger *slog.Logger) *Manager {
 
 	// Initialize trackers
 	for i, trackerURL := range trackerURLs {
+		// Skip empty tracker URLs
+		if trackerURL == "" {
+			logger.Debug("skipping empty tracker URL")
+			continue
+		}
+
 		tracker, err := createTracker(trackerURL)
 		if err != nil {
 			logger.Warn("failed to create tracker", "url", trackerURL, "error", err)

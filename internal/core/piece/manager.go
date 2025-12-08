@@ -16,10 +16,10 @@ const (
 
 // Manager coordinates piece downloads and assembly
 type Manager struct {
-	info     *torrent.Info
-	storage  storage.Storage
-	pieces   map[int]*PieceDownload
-	mu       sync.RWMutex
+	info    *torrent.Info
+	storage storage.Storage
+	pieces  map[int]*PieceDownload
+	mu      sync.RWMutex
 }
 
 // PieceDownload represents an in-progress piece download
@@ -34,9 +34,10 @@ type PieceDownload struct {
 
 // Block represents a single block within a piece
 type Block struct {
-	Offset int
-	Length int
-	Done   bool
+	Offset    int
+	Length    int
+	Done      bool
+	Requested bool // Tracks if block is currently requested (in-flight)
 }
 
 // NewManager creates a new piece manager
@@ -115,6 +116,7 @@ func (m *Manager) CompletePiece(pieceIndex int) error {
 		pd.mu.Lock()
 		for i := range pd.Blocks {
 			pd.Blocks[i].Done = false
+			pd.Blocks[i].Requested = false
 		}
 		pd.Downloaded = 0
 		pd.mu.Unlock()
@@ -170,8 +172,9 @@ func (pd *PieceDownload) WriteBlock(offset int, data []byte) error {
 	// Copy data to buffer
 	copy(pd.Buffer[offset:offset+block.Length], data)
 
-	// Mark block as done
+	// Mark block as done and clear requested flag
 	block.Done = true
+	block.Requested = false
 	pd.Downloaded += block.Length
 
 	return nil
@@ -195,8 +198,11 @@ func (pd *PieceDownload) NextBlock() (offset int, length int, found bool) {
 	pd.mu.Lock()
 	defer pd.mu.Unlock()
 
-	for _, block := range pd.Blocks {
-		if !block.Done {
+	for i := range pd.Blocks {
+		block := &pd.Blocks[i]
+		if !block.Done && !block.Requested {
+			// Mark as requested to prevent duplicate requests
+			block.Requested = true
 			return block.Offset, block.Length, true
 		}
 	}
@@ -269,6 +275,20 @@ func buildBlocks(pieceLength int) []Block {
 	}
 
 	return blocks
+}
+
+// GetInProgressBytes returns total bytes downloaded for in-progress pieces
+func (m *Manager) GetInProgressBytes() int64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var total int64
+	for _, pd := range m.pieces {
+		pd.mu.Lock()
+		total += int64(pd.Downloaded)
+		pd.mu.Unlock()
+	}
+	return total
 }
 
 // VerifyPieceData verifies a piece's SHA-1 hash without writing to storage

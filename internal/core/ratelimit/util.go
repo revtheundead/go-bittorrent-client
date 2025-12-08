@@ -9,21 +9,21 @@ const (
 	Unlimited = 0
 
 	// Download speeds
-	Speed256Kbps  = 32 * 1024      // 256 Kbps = 32 KB/s
-	Speed512Kbps  = 64 * 1024      // 512 Kbps = 64 KB/s
-	Speed1Mbps    = 128 * 1024     // 1 Mbps = 128 KB/s
-	Speed2Mbps    = 256 * 1024     // 2 Mbps = 256 KB/s
-	Speed5Mbps    = 640 * 1024     // 5 Mbps = 640 KB/s
-	Speed10Mbps   = 1280 * 1024    // 10 Mbps = 1.25 MB/s
-	Speed25Mbps   = 3200 * 1024    // 25 Mbps = 3.2 MB/s
-	Speed50Mbps   = 6400 * 1024    // 50 Mbps = 6.4 MB/s
-	Speed100Mbps  = 12800 * 1024   // 100 Mbps = 12.8 MB/s
-	Speed1Gbps    = 128000 * 1024  // 1 Gbps = 128 MB/s
+	Speed256Kbps = 32 * 1024     // 256 Kbps = 32 KB/s
+	Speed512Kbps = 64 * 1024     // 512 Kbps = 64 KB/s
+	Speed1Mbps   = 128 * 1024    // 1 Mbps = 128 KB/s
+	Speed2Mbps   = 256 * 1024    // 2 Mbps = 256 KB/s
+	Speed5Mbps   = 640 * 1024    // 5 Mbps = 640 KB/s
+	Speed10Mbps  = 1280 * 1024   // 10 Mbps = 1.25 MB/s
+	Speed25Mbps  = 3200 * 1024   // 25 Mbps = 3.2 MB/s
+	Speed50Mbps  = 6400 * 1024   // 50 Mbps = 6.4 MB/s
+	Speed100Mbps = 12800 * 1024  // 100 Mbps = 12.8 MB/s
+	Speed1Gbps   = 128000 * 1024 // 1 Gbps = 128 MB/s
 
 	// Upload speeds (typically lower)
-	UploadSlow   = 32 * 1024   // 32 KB/s
-	UploadMedium = 128 * 1024  // 128 KB/s
-	UploadFast   = 512 * 1024  // 512 KB/s
+	UploadSlow   = 32 * 1024  // 32 KB/s
+	UploadMedium = 128 * 1024 // 128 KB/s
+	UploadFast   = 512 * 1024 // 512 KB/s
 )
 
 // ParseBandwidth parses a bandwidth string and returns bytes per second

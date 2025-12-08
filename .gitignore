@@ -1,13 +1,12 @@
 bin/*
 data
+downloads/
 
 # Examples are WIP
 examples/
 
 # Documentation and README is WIP
 docs/
-IMPLEMENTATION_STATUS.md
-INTEGRATION_COMPLETE.md
 README.md
 
 # Integration test code will be revised

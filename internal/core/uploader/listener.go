@@ -201,6 +201,18 @@ func (l *Listener) GetActivePeers() int {
 	return len(l.activePeers)
 }
 
+// GetTotalUploaded returns the total bytes uploaded to all peers
+func (l *Listener) GetTotalUploaded() int64 {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	var total int64
+	for _, peer := range l.activePeers {
+		total += peer.Uploaded()
+	}
+	return total
+}
+
 // BroadcastHave broadcasts a Have message to all connected peers
 func (l *Listener) BroadcastHave(pieceIndex int) {
 	l.mu.RLock()

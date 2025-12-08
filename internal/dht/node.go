@@ -141,7 +141,7 @@ func (d *DHT) Bootstrap(bootstrapNodes []string) error {
 		}
 
 		if err := d.findNode(node, d.nodeID); err != nil {
-			d.logger.Warn("bootstrap find_node failed", "addr", nodeAddr, "error", err)
+			d.logger.Debug("bootstrap find_node failed", "addr", nodeAddr, "error", err)
 			continue
 		}
 	}
@@ -167,7 +167,7 @@ func (d *DHT) GetPeers(infoHash [20]byte) ([]Peer, error) {
 		d.mu.RUnlock()
 		return peers, nil
 	}
-	d.mu.Unlock()
+	d.mu.RUnlock()
 
 	d.logger.Debug("looking up peers for info hash", "infoHash", infoHashStr)
 
