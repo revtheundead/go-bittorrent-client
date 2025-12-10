@@ -112,7 +112,10 @@ func (m *Manager) CompletePiece(pieceIndex int) error {
 	}
 
 	if !valid {
-		// Hash mismatch - mark blocks as incomplete for retry
+		// Hash mismatch - clear the bitfield bit that was set prematurely
+		m.storage.ClearPiece(pieceIndex)
+
+		// Mark blocks as incomplete for retry
 		pd.mu.Lock()
 		for i := range pd.Blocks {
 			pd.Blocks[i].Done = false
@@ -120,6 +123,9 @@ func (m *Manager) CompletePiece(pieceIndex int) error {
 		}
 		pd.Downloaded = 0
 		pd.mu.Unlock()
+
+		// CRITICAL: Remove from in-progress map so it can be restarted fresh
+		delete(m.pieces, pieceIndex)
 		m.mu.Unlock()
 		return fmt.Errorf("piece %d hash verification failed", pieceIndex)
 	}
@@ -135,6 +141,9 @@ func (m *Manager) CompletePiece(pieceIndex int) error {
 func (m *Manager) FailPiece(pieceIndex int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// Clear bitfield in case piece was prematurely marked complete
+	m.storage.ClearPiece(pieceIndex)
 
 	delete(m.pieces, pieceIndex)
 }

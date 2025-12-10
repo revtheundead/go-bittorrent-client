@@ -94,13 +94,14 @@ func (e *Engine) Start() error {
 	}
 
 	e.listener = listener
-	e.logger.Info("listening for incoming connections", "address", listener.Addr())
+	e.logger.Info("peer listener started", "port", e.config.ListenPort)
 
 	// Start accepting connections in background
 	e.wg.Add(1)
 	go e.acceptLoop()
 
 	e.running = true
+	e.logger.Info("engine started")
 	return nil
 }
 
@@ -121,7 +122,9 @@ func (e *Engine) Stop() error {
 
 	// Close listener
 	if e.listener != nil {
-		e.listener.Close()
+		if err := e.listener.Close(); err != nil {
+			e.logger.Warn("failed to close listener", "error", err)
+		}
 	}
 
 	// Stop all sessions
@@ -132,9 +135,12 @@ func (e *Engine) Stop() error {
 	}
 	e.sessionsMu.Unlock()
 
+	// Track session stop errors
+	var sessionErrors []error
 	for _, session := range sessions {
 		if err := session.Stop(); err != nil {
 			e.logger.Warn("failed to stop session", "info_hash", session.InfoHashHex(), "error", err)
+			sessionErrors = append(sessionErrors, err)
 		}
 	}
 
@@ -147,6 +153,12 @@ func (e *Engine) Stop() error {
 	e.wg.Wait()
 
 	e.logger.Info("engine stopped")
+
+	// Return error if any sessions failed to stop
+	if len(sessionErrors) > 0 {
+		return fmt.Errorf("failed to stop %d session(s)", len(sessionErrors))
+	}
+
 	return nil
 }
 
@@ -214,13 +226,14 @@ func (e *Engine) acceptLoop() {
 		if err != nil {
 			select {
 			case <-e.ctx.Done():
-				// Shutting down
 				return
 			default:
 				e.logger.Warn("failed to accept connection", "error", err)
 				continue
 			}
 		}
+
+		e.logger.Debug("incoming connection", "addr", conn.RemoteAddr())
 
 		// Handle connection in background
 		e.wg.Add(1)
@@ -239,8 +252,7 @@ func (e *Engine) handleIncomingConnection(conn net.Conn) {
 	// Read handshake
 	handshake, err := peer.ReadRemoteHandshake(conn)
 	if err != nil {
-		e.logger.Debug("failed to read handshake from incoming peer",
-			"addr", conn.RemoteAddr(), "error", err)
+		e.logger.Debug("incoming handshake failed", "addr", conn.RemoteAddr(), "error", err)
 		return
 	}
 
@@ -251,8 +263,7 @@ func (e *Engine) handleIncomingConnection(conn net.Conn) {
 	e.sessionsMu.RUnlock()
 
 	if !exists {
-		e.logger.Debug("no session for incoming peer",
-			"addr", conn.RemoteAddr(), "info_hash", infoHashHex)
+		e.logger.Debug("no session for incoming peer", "addr", conn.RemoteAddr())
 		return
 	}
 
@@ -261,7 +272,6 @@ func (e *Engine) handleIncomingConnection(conn net.Conn) {
 
 	// Let the session handle this peer
 	if err := session.HandleIncomingPeer(conn, handshake); err != nil {
-		e.logger.Warn("failed to handle incoming peer",
-			"addr", conn.RemoteAddr(), "error", err)
+		e.logger.Debug("failed to handle incoming peer", "addr", conn.RemoteAddr(), "error", err)
 	}
 }

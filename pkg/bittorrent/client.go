@@ -157,7 +157,7 @@ func (c *Client) AddMagnet(uri string) (*Torrent, error) {
 	}
 
 	// Create session
-	session, err := engine.NewSession(meta, c.config, c.logger)
+	session, err := engine.NewSession(meta, c.config, c.logger, c.engine)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create session: %w", err)
 	}
@@ -198,7 +198,7 @@ func (c *Client) AddTorrentFromBytes(data []byte) (*Torrent, error) {
 	c.mu.Unlock()
 
 	// Create session
-	session, err := engine.NewSession(meta, c.config, c.logger)
+	session, err := engine.NewSession(meta, c.config, c.logger, c.engine)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create session: %w", err)
 	}

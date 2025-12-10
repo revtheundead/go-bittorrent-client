@@ -51,7 +51,7 @@ func (rq *RequestQueue) FillPipeline(sendRequest func(offset, length int)) {
 			Offset:  offset,
 			Length:  length,
 			SentAt:  time.Now(),
-			Timeout: 30 * time.Second,
+			Timeout: 15 * time.Second, // Quick timeout to abandon slow peers
 		}
 
 		rq.requests = append(rq.requests, req)

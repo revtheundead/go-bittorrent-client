@@ -25,6 +25,9 @@ type Storage interface {
 	// HasPiece returns true if the piece is complete and verified
 	HasPiece(pieceIndex int) bool
 
+	// ClearPiece marks a piece as incomplete (used when verification fails)
+	ClearPiece(pieceIndex int)
+
 	// VerifyPiece verifies the SHA-1 hash of a piece
 	VerifyPiece(pieceIndex int) (bool, error)
 
@@ -217,6 +220,11 @@ func (fs *FileStorage) WritePiece(pieceIndex int, data []byte) error {
 // HasPiece returns true if the piece is marked as complete
 func (fs *FileStorage) HasPiece(pieceIndex int) bool {
 	return fs.bitfield.Has(pieceIndex)
+}
+
+// ClearPiece marks a piece as incomplete (used when hash verification fails)
+func (fs *FileStorage) ClearPiece(pieceIndex int) {
+	fs.bitfield.Clear(pieceIndex)
 }
 
 // VerifyPiece verifies the SHA-1 hash of a piece

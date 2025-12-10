@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,7 +16,6 @@ import (
 	"github.com/revtheundead/revtorrent/internal/core/piece"
 	"github.com/revtheundead/revtorrent/internal/core/storage"
 	"github.com/revtheundead/revtorrent/internal/core/torrent"
-	"github.com/revtheundead/revtorrent/internal/core/uploader"
 	"github.com/revtheundead/revtorrent/internal/tracker"
 )
 
@@ -37,6 +37,7 @@ type Session struct {
 	meta   *torrent.Metainfo
 	config *config.Config
 	logger *slog.Logger
+	engine *Engine // Reference to engine for DHT access
 
 	// Storage
 	storage       *storage.FileStorage
@@ -53,7 +54,8 @@ type Session struct {
 	endgameTracker  *downloader.EndgameTracker
 
 	// Upload coordination
-	uploadListener *uploader.Listener
+	uploadPeers   map[string]net.Conn // addr -> connection for upload peers
+	uploadPeersMu sync.RWMutex
 
 	// Statistics
 	stats              SessionStats
@@ -119,7 +121,7 @@ const (
 )
 
 // NewSession creates a new torrent session
-func NewSession(meta *torrent.Metainfo, cfg *config.Config, logger *slog.Logger) (*Session, error) {
+func NewSession(meta *torrent.Metainfo, cfg *config.Config, logger *slog.Logger, engine *Engine) (*Session, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -147,6 +149,7 @@ func NewSession(meta *torrent.Metainfo, cfg *config.Config, logger *slog.Logger)
 		meta:           meta,
 		config:         cfg,
 		logger:         logger,
+		engine:         engine,
 		storage:        stor,
 		resumeManager:  resumeMgr,
 		trackerManager: trackerMgr,
@@ -205,11 +208,20 @@ func (s *Session) Start() error {
 	s.wg.Add(1)
 	go s.trackerAnnounceLoop()
 
+	// Start DHT peer discovery (if DHT is enabled)
+	if s.config.DHTEnabled {
+		s.wg.Add(1)
+		go s.dhtPeerDiscoveryLoop()
+	}
+
 	// Initialize piece manager
 	s.pieceManager = piece.NewManager(&s.meta.Info, s.storage)
 
 	// Initialize download peer tracker
 	s.downloadPeers = make(map[string]net.Conn)
+
+	// Initialize upload peer tracker
+	s.uploadPeers = make(map[string]net.Conn)
 
 	// Initialize endgame tracker
 	s.endgameTracker = downloader.NewEndgameTracker()
@@ -225,19 +237,6 @@ func (s *Session) Start() error {
 
 		s.wg.Add(1)
 		go s.coordinator.Start(s.ctx, &s.wg)
-	}
-
-	// Start upload listener for seeding
-	s.uploadListener = uploader.NewListener(
-		s.config.ListenPort,
-		s.meta.InfoHash,
-		tracker.GeneratePeerID(),
-		s.storage,
-		s.logger,
-	)
-
-	if err := s.uploadListener.Start(); err != nil {
-		s.logger.Warn("failed to start upload listener", "error", err)
 	}
 
 	// Check if already complete
@@ -283,10 +282,13 @@ func (s *Session) Stop() error {
 		s.announceToTracker("stopped")
 	}
 
-	// Stop upload listener
-	if s.uploadListener != nil {
-		s.uploadListener.Stop()
+	// Close all upload peer connections
+	s.uploadPeersMu.Lock()
+	for addr, conn := range s.uploadPeers {
+		conn.Close()
+		delete(s.uploadPeers, addr)
 	}
+	s.uploadPeersMu.Unlock()
 
 	// Close storage
 	if s.storage != nil {
@@ -377,7 +379,7 @@ func (s *Session) Resume() error {
 
 // HandleIncomingPeer handles an incoming peer connection
 func (s *Session) HandleIncomingPeer(conn net.Conn, handshake *peer.Handshake) error {
-	s.logger.Debug("handling incoming peer", "addr", conn.RemoteAddr())
+	s.logger.Info("UPLOAD: handling incoming peer", "addr", conn.RemoteAddr())
 
 	// Send our handshake
 	ourHandshake := peer.NewHandshake(s.meta.InfoHash, tracker.GeneratePeerID())
@@ -395,6 +397,12 @@ func (s *Session) HandleIncomingPeer(conn net.Conn, handshake *peer.Handshake) e
 		return fmt.Errorf("failed to send bitfield: %w", err)
 	}
 
+	// Register upload peer
+	addr := conn.RemoteAddr().String()
+	s.uploadPeersMu.Lock()
+	s.uploadPeers[addr] = conn
+	s.uploadPeersMu.Unlock()
+
 	// Start upload peer in background
 	s.wg.Add(1)
 	go s.serveUploadPeer(conn, handshake)
@@ -407,9 +415,21 @@ func (s *Session) serveUploadPeer(conn net.Conn, handshake *peer.Handshake) {
 	defer s.wg.Done()
 	defer conn.Close()
 
-	s.logger.Debug("serving upload peer", "addr", conn.RemoteAddr())
+	addr := conn.RemoteAddr().String()
+	defer func() {
+		// Unregister upload peer
+		s.uploadPeersMu.Lock()
+		delete(s.uploadPeers, addr)
+		s.uploadPeersMu.Unlock()
+	}()
 
-	// Simple message loop to handle upload requests
+	s.logger.Debug("serving upload peer", "addr", addr)
+
+	// Peer state
+	choked := true       // We start with peer choked
+	peerInterested := false
+
+	// Message loop to handle upload requests
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -418,7 +438,7 @@ func (s *Session) serveUploadPeer(conn net.Conn, handshake *peer.Handshake) {
 		}
 
 		// Set read deadline
-		conn.SetReadDeadline(time.Now().Add(2 * time.Minute))
+		conn.SetReadDeadline(time.Now().Add(1 * time.Minute))
 
 		// Read message
 		msg, err := peer.ReadMessage(conn)
@@ -432,29 +452,106 @@ func (s *Session) serveUploadPeer(conn net.Conn, handshake *peer.Handshake) {
 			continue
 		}
 
-		// Handle request messages
-		if msg.ID == peer.MsgRequest && len(msg.Payload) == 12 {
+		// Handle different message types
+		switch msg.ID {
+		case peer.MsgInterested:
+			peerInterested = true
+			s.logger.Info("upload: peer interested", "addr", addr)
+
+			// Unchoke the peer (optimistic unchoking - we unchoke all interested peers)
+			if choked {
+				choked = false
+				unchokeMsg := peer.Message{ID: peer.MsgUnchoke}
+				if err := peer.WriteMessage(conn, unchokeMsg); err != nil {
+					s.logger.Debug("failed to send unchoke", "error", err, "to", addr)
+					return
+				}
+				s.logger.Info("upload: unchoked peer", "addr", addr)
+			}
+
+		case peer.MsgNotInterested:
+			peerInterested = false
+			s.logger.Debug("peer not interested", "addr", addr)
+
+		case peer.MsgRequest:
+			if len(msg.Payload) != 12 {
+				continue
+			}
+
+			// Only serve requests if peer is unchoked
+			if choked {
+				s.logger.Debug("ignoring request from choked peer", "addr", addr)
+				continue
+			}
+
+			// Only serve requests if peer is interested
+			if !peerInterested {
+				s.logger.Debug("ignoring request from uninterested peer", "addr", addr)
+				continue
+			}
 			pieceIndex := int(binary.BigEndian.Uint32(msg.Payload[0:4]))
 			begin := int(binary.BigEndian.Uint32(msg.Payload[4:8]))
 			length := int(binary.BigEndian.Uint32(msg.Payload[8:12]))
 
-			// Read piece data from storage
-			buf := make([]byte, length)
-			n, err := s.storage.ReadPiece(pieceIndex, buf)
-			if err != nil || n != length {
-				s.logger.Warn("failed to read piece for upload",
-					"piece", pieceIndex, "begin", begin, "length", length, "error", err)
+			// Validate request
+			if length > 16*1024 {
+				s.logger.Warn("request length too large", "length", length, "from", addr)
 				continue
 			}
 
-			// Extract the requested block
-			pieceData := buf[begin:min(begin+length, n)]
+			// Check if we have the piece
+			if !s.storage.HasPiece(pieceIndex) {
+				s.logger.Debug("don't have requested piece", "piece", pieceIndex, "from", addr)
+				continue
+			}
+
+			// Calculate piece length (last piece may be smaller)
+			totalLength := s.meta.Info.TotalLength()
+			pieceLength := s.meta.Info.PieceLength
+			pieceOffset := int64(pieceIndex) * pieceLength
+			pieceEnd := pieceOffset + pieceLength
+			if pieceEnd > totalLength {
+				pieceEnd = totalLength
+			}
+			actualPieceLength := int(pieceEnd - pieceOffset)
+
+			// Validate request is within piece bounds
+			if begin+length > actualPieceLength {
+				s.logger.Warn("request out of bounds",
+					"piece", pieceIndex,
+					"begin", begin,
+					"length", length,
+					"piece_length", actualPieceLength,
+					"from", addr)
+				continue
+			}
+
+			// Read the entire piece from storage
+			pieceBuf := make([]byte, actualPieceLength)
+			n, err := s.storage.ReadPiece(pieceIndex, pieceBuf)
+			if err != nil {
+				s.logger.Warn("failed to read piece for upload",
+					"piece", pieceIndex, "error", err, "from", addr)
+				continue
+			}
+
+			if n != actualPieceLength {
+				s.logger.Warn("incomplete piece read",
+					"piece", pieceIndex,
+					"expected", actualPieceLength,
+					"got", n,
+					"from", addr)
+				continue
+			}
+
+			// Extract the requested block from the piece
+			blockData := pieceBuf[begin : begin+length]
 
 			// Send piece message
-			payload := make([]byte, 8+len(pieceData))
+			payload := make([]byte, 8+length)
 			binary.BigEndian.PutUint32(payload[0:4], uint32(pieceIndex))
 			binary.BigEndian.PutUint32(payload[4:8], uint32(begin))
-			copy(payload[8:], pieceData)
+			copy(payload[8:], blockData)
 
 			pieceMsg := peer.Message{
 				ID:      peer.MsgPiece,
@@ -462,18 +559,18 @@ func (s *Session) serveUploadPeer(conn net.Conn, handshake *peer.Handshake) {
 			}
 
 			if err := peer.WriteMessage(conn, pieceMsg); err != nil {
-				s.logger.Debug("failed to send piece", "error", err)
+				s.logger.Debug("failed to send piece", "error", err, "to", addr)
 				return
 			}
 
 			// Track uploaded bytes
-			s.AddUploaded(int64(len(pieceData)))
+			s.AddUploaded(int64(length))
 
-			s.logger.Debug("uploaded block",
+			s.logger.Info("upload: sent block",
 				"piece", pieceIndex,
 				"begin", begin,
-				"length", len(pieceData),
-				"to", conn.RemoteAddr())
+				"length", length,
+				"to", addr)
 		}
 	}
 }
@@ -622,11 +719,18 @@ func (s *Session) updateStats() {
 	completedPieces := s.storage.Bitfield().Count()
 	totalPieces := s.storage.Bitfield().Len()
 
-	// Bytes from completed pieces
+	// Bytes from completed pieces - properly handle last piece size
 	completedBytes := int64(0)
 	for i := 0; i < totalPieces; i++ {
 		if s.storage.HasPiece(i) {
-			completedBytes += s.meta.Info.PieceLength
+			// Calculate actual piece length (last piece may be smaller)
+			pieceOffset := int64(i) * s.meta.Info.PieceLength
+			pieceEnd := pieceOffset + s.meta.Info.PieceLength
+			if pieceEnd > totalLength {
+				pieceEnd = totalLength
+			}
+			actualPieceLength := pieceEnd - pieceOffset
+			completedBytes += actualPieceLength
 		}
 	}
 
@@ -638,21 +742,23 @@ func (s *Session) updateStats() {
 
 	totalDownloaded := completedBytes + inProgressBytes
 
-	// Calculate actual progress (handle last piece which may be smaller)
+	// Clamp to total length to avoid > 100%
+	if totalDownloaded > totalLength {
+		totalDownloaded = totalLength
+	}
+
+	// Calculate actual progress
 	progress := float64(totalDownloaded) / float64(totalLength)
 	if progress > 1.0 {
 		progress = 1.0
 	}
 
-	// Get uploaded bytes from upload listener
-	totalUploaded := int64(0)
-	if s.uploadListener != nil {
-		totalUploaded = s.uploadListener.GetTotalUploaded()
-	}
-
 	// Calculate rates
 	now := time.Now()
 	s.statsMu.Lock()
+
+	// Get uploaded bytes from session tracker
+	totalUploaded := s.uploadedBytes
 
 	downloadRate := float64(0)
 	uploadRate := float64(0)
@@ -662,6 +768,14 @@ func (s *Session) updateStats() {
 		if elapsed > 0 {
 			downloadDelta := totalDownloaded - s.previousDownloaded
 			uploadDelta := totalUploaded - s.previousUploaded
+
+			// Clamp negative deltas to 0 (can happen during piece verification failures)
+			if downloadDelta < 0 {
+				downloadDelta = 0
+			}
+			if uploadDelta < 0 {
+				uploadDelta = 0
+			}
 
 			downloadRate = float64(downloadDelta) / elapsed
 			uploadRate = float64(uploadDelta) / elapsed
@@ -673,10 +787,10 @@ func (s *Session) updateStats() {
 	downloadPeerCount := len(s.downloadPeers)
 	s.downloadPeersMu.RUnlock()
 
-	uploadPeerCount := 0
-	if s.uploadListener != nil {
-		uploadPeerCount = s.uploadListener.GetActivePeers()
-	}
+	s.uploadPeersMu.RLock()
+	uploadPeerCount := len(s.uploadPeers)
+	s.uploadPeersMu.RUnlock()
+
 	peerCount := downloadPeerCount + uploadPeerCount
 
 	// Update stats
@@ -710,12 +824,37 @@ func (s *Session) progressMonitor() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
+	// Diagnostic counter for periodic logging
+	diagnosticCounter := 0
+
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
 		case <-ticker.C:
 			s.updateStats()
+
+			// Periodic diagnostic logging (every 10 seconds)
+			diagnosticCounter++
+			if diagnosticCounter >= 10 {
+				diagnosticCounter = 0
+				stats := s.Stats()
+
+				s.downloadPeersMu.RLock()
+				downloadPeers := len(s.downloadPeers)
+				s.downloadPeersMu.RUnlock()
+
+				s.uploadPeersMu.RLock()
+				uploadPeers := len(s.uploadPeers)
+				s.uploadPeersMu.RUnlock()
+
+				s.logger.Info("status",
+					"progress", fmt.Sprintf("%.1f%%", stats.Progress*100),
+					"download_peers", downloadPeers,
+					"upload_peers", uploadPeers,
+					"down_rate", fmt.Sprintf("%.1f KB/s", stats.DownloadRate/1024),
+					"up_rate", fmt.Sprintf("%.1f KB/s", stats.UploadRate/1024))
+			}
 
 			// Send progress event if downloading or seeding
 			state := s.getState()
@@ -759,9 +898,12 @@ func (s *Session) trackerAnnounceLoop() {
 	s.announceToTracker("started")
 
 	// Retry more frequently if we have too few peers
-	minPeers := 5 // Minimum desired peer connections
+	targetPeers := s.config.MaxPeers / 2 // Target at least half of max peers
+	if targetPeers < 10 {
+		targetPeers = 10 // Minimum target of 10 peers
+	}
 	shortInterval := 30 * time.Second
-	longInterval := 30 * time.Minute
+	longInterval := 3 * time.Minute // Optimal balance for peer discovery
 
 	ticker := time.NewTicker(shortInterval)
 	defer ticker.Stop()
@@ -776,22 +918,109 @@ func (s *Session) trackerAnnounceLoop() {
 			activePeers := len(s.downloadPeers)
 			s.downloadPeersMu.RUnlock()
 
-			// If we have enough peers, slow down announces
-			if activePeers >= minPeers {
+			state := s.getState()
+
+			// During download, be more aggressive about finding peers
+			if state == StateDownloading {
+				// If we have critically few peers, announce immediately
+				if activePeers < 3 {
+					s.logger.Debug("critically low peer count, announcing to tracker", "active_peers", activePeers)
+					s.announceToTracker("")
+					ticker.Reset(shortInterval)
+				} else if activePeers < targetPeers {
+					s.logger.Debug("below target peers, announcing to tracker", "active_peers", activePeers, "target", targetPeers)
+					s.announceToTracker("")
+					ticker.Reset(shortInterval)
+				} else {
+					// We have enough peers, but still announce periodically
+					ticker.Reset(longInterval)
+					s.logger.Debug("enough peers connected, using long announce interval", "active_peers", activePeers, "target", targetPeers)
+				}
+			} else if state == StateSeeding {
+				// When seeding, announce less frequently
 				ticker.Reset(longInterval)
-				s.logger.Debug("enough peers connected, using long announce interval", "active_peers", activePeers)
-			} else {
-				ticker.Reset(shortInterval)
-				s.logger.Debug("too few peers, using short announce interval", "active_peers", activePeers, "min_peers", minPeers)
-				s.announceToTracker("")
+			}
+		}
+	}
+}
+
+func (s *Session) dhtPeerDiscoveryLoop() {
+	defer s.wg.Done()
+
+	// Check if DHT is available
+	if s.engine == nil || s.engine.dht == nil {
+		s.logger.Debug("DHT not available, skipping DHT peer discovery")
+		return
+	}
+
+	// Wait a bit before first DHT query to let initial tracker announce complete
+	time.Sleep(10 * time.Second)
+
+	ticker := time.NewTicker(30 * time.Second) // Query DHT every 30 seconds
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			state := s.getState()
+			if state != StateDownloading {
+				continue
+			}
+
+			// Check current peer count
+			s.downloadPeersMu.RLock()
+			activePeers := len(s.downloadPeers)
+			s.downloadPeersMu.RUnlock()
+
+			targetPeers := s.config.MaxPeers / 2
+			if targetPeers < 10 {
+				targetPeers = 10
+			}
+
+			// Only query DHT if we need more peers
+			if activePeers >= targetPeers {
+				continue
+			}
+
+			s.logger.Debug("querying DHT for additional peers", "active_peers", activePeers, "target", targetPeers)
+
+			// Get peers from DHT
+			dhtPeers, err := s.engine.dht.GetPeers(s.meta.InfoHash)
+			if err != nil {
+				s.logger.Debug("DHT peer lookup failed", "error", err)
+				continue
+			}
+
+			if len(dhtPeers) == 0 {
+				s.logger.Debug("DHT returned no peers")
+				continue
+			}
+
+			s.logger.Debug("DHT returned peers", "count", len(dhtPeers))
+
+			// Try to connect to DHT peers
+			maxAttempts := 20 // Try up to 20 DHT peers
+			if len(dhtPeers) < maxAttempts {
+				maxAttempts = len(dhtPeers)
+			}
+
+			for i := 0; i < maxAttempts; i++ {
+				dhtPeer := dhtPeers[i]
+				peerInfo := tracker.Peer{
+					IP:   dhtPeer.IP,
+					Port: uint16(dhtPeer.Port),
+				}
+
+				s.wg.Add(1)
+				go s.connectToPeer(peerInfo)
 			}
 		}
 	}
 }
 
 func (s *Session) announceToTracker(event string) {
-	s.logger.Debug("announcing to tracker", "event", event)
-
 	stats := s.Stats()
 
 	req := &tracker.AnnounceRequest{
@@ -805,6 +1034,12 @@ func (s *Session) announceToTracker(event string) {
 		Event:      event,
 		NumWant:    100, // Request more peers to compensate for high failure rate
 	}
+
+	s.logger.Info("TRACKER ANNOUNCE",
+		"event", event,
+		"port", req.Port,
+		"uploaded", stats.Uploaded,
+		"downloaded", stats.Downloaded)
 
 	resp, err := s.trackerManager.Announce(req)
 	if err != nil {
@@ -849,7 +1084,25 @@ func (s *Session) connectToPeer(peerInfo tracker.Peer) {
 	defer s.wg.Done()
 
 	addr := fmt.Sprintf("%s:%d", peerInfo.IP, peerInfo.Port)
-	s.logger.Debug("connecting to peer for download", "addr", addr)
+
+	// Check if we're already connected to this peer
+	s.downloadPeersMu.RLock()
+	_, exists := s.downloadPeers[addr]
+	currentPeerCount := len(s.downloadPeers)
+	s.downloadPeersMu.RUnlock()
+
+	if exists {
+		s.logger.Debug("already connected to peer, skipping", "addr", addr)
+		return
+	}
+
+	// Check if we have too many connections (respect max_peers setting)
+	if currentPeerCount >= s.config.MaxPeers {
+		s.logger.Debug("max peers reached, skipping connection", "addr", addr, "current", currentPeerCount, "max", s.config.MaxPeers)
+		return
+	}
+
+	s.logger.Debug("connecting to peer for download", "addr", addr, "current_peers", currentPeerCount)
 
 	// Attempt connection with short timeout (2s like metadata fetch)
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
@@ -1046,6 +1299,22 @@ func (s *Session) completePiece(peerState *downloader.PeerState, pieceIndex int,
 	err := s.pieceManager.CompletePiece(pieceIndex)
 	if err != nil {
 		s.logger.Warn("piece completion failed", "piece", pieceIndex, "addr", addr, "error", err)
+
+		// Track hash verification failure
+		peerState.IncrementHashFailures()
+		hashFailures := peerState.GetHashFailures()
+		s.logger.Warn("peer hash failure", "addr", addr, "failures", hashFailures)
+
+		// Ban peer if too many failures
+		if peerState.ShouldBanPeer() {
+			s.logger.Warn("banning peer due to repeated hash failures", "addr", addr, "failures", hashFailures)
+			// Mark for disconnection by returning a special error
+			s.coordinator.FailPiece(pieceIndex)
+			peerState.CurrentPiece = nil
+			peerState.RequestQueue = nil
+			return fmt.Errorf("peer banned: too many hash failures (%d)", hashFailures)
+		}
+
 		s.coordinator.FailPiece(pieceIndex)
 		peerState.CurrentPiece = nil
 		peerState.RequestQueue = nil
@@ -1133,11 +1402,13 @@ func (s *Session) startDownloading(peerState *downloader.PeerState, peerBitfield
 	// Set peer state
 	peerState.CurrentPiece = &pieceIndex
 
-	// Create request queue with max pipeline of 5
-	rq := downloader.NewRequestQueue(pieceIndex, pd, 5)
+	// Create request queue with max pipeline of 20 (was 5, way too low)
+	// With 16KB blocks, 20 requests = 320KB in flight per peer
+	// This keeps the pipeline full and maximizes throughput
+	rq := downloader.NewRequestQueue(pieceIndex, pd, 20)
 	peerState.RequestQueue = rq
 
-	s.logger.Debug("starting piece download",
+	s.logger.Info("download: starting piece",
 		"addr", addr,
 		"piece", pieceIndex,
 		"size", pd.Length)
@@ -1214,9 +1485,10 @@ func (s *Session) serveDownloadPeer(conn net.Conn, handshake *peer.Handshake, ad
 
 	// Track if peer has unchoked us
 	unchoked := false
+	chokedSince := time.Now() // Track how long we've been choked
 
-	// Timeout checker
-	timeoutTicker := time.NewTicker(5 * time.Second)
+	// Timeout checker - runs frequently to ensure idle peers quickly grab new pieces
+	timeoutTicker := time.NewTicker(1 * time.Second)
 	defer timeoutTicker.Stop()
 
 	// Message loop
@@ -1226,6 +1498,24 @@ func (s *Session) serveDownloadPeer(conn net.Conn, handshake *peer.Handshake, ad
 			return
 
 		case <-timeoutTicker.C:
+			// Update peer download rate
+			peerState.UpdateRate()
+
+			// Check if peer is too slow
+			if peerState.IsTooSlow() {
+				s.logger.Info("disconnecting: peer too slow",
+					"addr", addr,
+					"rate", peerState.GetDownloadRate())
+				return
+			}
+
+			// Check if peer has kept us choked for too long
+			if !unchoked && time.Since(chokedSince) > 15*time.Second {
+				s.logger.Debug("disconnecting: peer kept us choked too long",
+					"addr", addr,
+					"duration", time.Since(chokedSince))
+				return
+			}
 			// Check for timed out block requests
 			if peerState.RequestQueue != nil {
 				timedOut := peerState.RequestQueue.CheckTimeouts()
@@ -1251,13 +1541,27 @@ func (s *Session) serveDownloadPeer(conn net.Conn, handshake *peer.Handshake, ad
 					}
 				}
 			}
+
+			// Also retry piece assignment for idle peers (important!)
+			// This ensures peers don't sit idle when pieces become available
+			if unchoked && peerState.IsIdle() && s.getState() == StateDownloading {
+				s.logger.Debug("idle peer retry", "addr", addr, "unchoked", unchoked)
+				if err := s.startDownloading(peerState, peerState.GetBitfield(), conn, addr); err != nil {
+					s.logger.Debug("retry failed", "addr", addr, "error", err)
+				}
+			}
+
+			// Log peer status for diagnostics
+			if !unchoked && peerState.IsIdle() {
+				s.logger.Debug("peer idle and choked", "addr", addr)
+			}
 			continue
 
 		default:
 		}
 
 		// Set read deadline
-		conn.SetReadDeadline(time.Now().Add(2 * time.Minute))
+		conn.SetReadDeadline(time.Now().Add(1 * time.Minute))
 
 		// Read message
 		msg, err := peer.ReadMessage(conn)
@@ -1274,12 +1578,13 @@ func (s *Session) serveDownloadPeer(conn net.Conn, handshake *peer.Handshake, ad
 		// Handle messages
 		switch msg.ID {
 		case peer.MsgChoke:
-			s.logger.Debug("peer choked us", "addr", addr)
+			s.logger.Info("download: peer choked us", "addr", addr)
 			peerState.SetPeerChoking(true)
 			unchoked = false
+			chokedSince = time.Now() // Reset choke timer
 
 		case peer.MsgUnchoke:
-			s.logger.Debug("peer unchoked us", "addr", addr)
+			s.logger.Info("download: peer unchoked us", "addr", addr)
 			peerState.SetPeerChoking(false)
 			unchoked = true
 
@@ -1335,11 +1640,22 @@ func (s *Session) serveDownloadPeer(conn net.Conn, handshake *peer.Handshake, ad
 			// Handle the received block
 			if err := s.handleReceivedBlock(peerState, pieceIndex, offset, data, conn, addr); err != nil {
 				s.logger.Debug("failed to handle block", "addr", addr, "error", err)
-				// On error, fail the piece and continue
+				// On error, fail the piece
 				if peerState.CurrentPiece != nil {
 					s.coordinator.FailPiece(*peerState.CurrentPiece)
 					peerState.CurrentPiece = nil
 					peerState.RequestQueue = nil
+				}
+				// If peer is banned, disconnect
+				if strings.Contains(err.Error(), "peer banned") {
+					s.logger.Warn("disconnecting banned peer", "addr", addr)
+					return // Exit peer loop to close connection
+				}
+				// Immediately try to get a new piece instead of waiting for timeout
+				if peerState.IsIdle() && unchoked {
+					if err := s.startDownloading(peerState, peerState.GetBitfield(), conn, addr); err != nil {
+						s.logger.Debug("failed to start downloading after error", "addr", addr, "error", err)
+					}
 				}
 				continue
 			}

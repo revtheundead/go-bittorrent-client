@@ -2,6 +2,7 @@ package downloader
 
 import (
 	"sync"
+	"time"
 
 	"github.com/revtheundead/revtorrent/internal/core/storage"
 )
@@ -24,25 +25,36 @@ type PeerState struct {
 	RequestQueue *RequestQueue // Active request queue
 
 	// Statistics
-	Downloaded   int64   // Total bytes downloaded from this peer
-	DownloadRate float64 // Current download rate (bytes/sec)
+	Downloaded       int64     // Total bytes downloaded from this peer
+	DownloadRate     float64   // Current download rate (bytes/sec)
+	LastRateUpdate   time.Time // Last time download rate was calculated
+	LastDownloaded   int64     // Downloaded bytes at last rate update
+	SlowPeerDuration time.Duration // How long peer has been slow
+
+	// Reliability tracking
+	HashFailures int // Number of hash verification failures
 
 	mu sync.RWMutex
 }
 
 // NewPeerState creates a new peer state
 func NewPeerState(addr string, numPieces int) *PeerState {
+	now := time.Now()
 	return &PeerState{
-		Addr:           addr,
-		Bitfield:       storage.NewBitfield(numPieces),
-		AmChoking:      true, // Start choked
-		AmInterested:   false,
-		PeerChoking:    true, // Assume peer chokes us initially
-		PeerInterested: false,
-		CurrentPiece:   nil,
-		RequestQueue:   nil,
-		Downloaded:     0,
-		DownloadRate:   0,
+		Addr:             addr,
+		Bitfield:         storage.NewBitfield(numPieces),
+		AmChoking:        true, // Start choked
+		AmInterested:     false,
+		PeerChoking:      true, // Assume peer chokes us initially
+		PeerInterested:   false,
+		CurrentPiece:     nil,
+		RequestQueue:     nil,
+		Downloaded:       0,
+		DownloadRate:     0,
+		LastRateUpdate:   now,
+		LastDownloaded:   0,
+		SlowPeerDuration: 0,
+		HashFailures:     0,
 	}
 }
 
@@ -114,4 +126,69 @@ func (ps *PeerState) GetBitfield() *storage.Bitfield {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 	return ps.Bitfield
+}
+
+// IncrementHashFailures increments the hash failure counter
+func (ps *PeerState) IncrementHashFailures() {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	ps.HashFailures++
+}
+
+// GetHashFailures returns the number of hash failures
+func (ps *PeerState) GetHashFailures() int {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	return ps.HashFailures
+}
+
+// ShouldBanPeer returns true if the peer has too many hash failures
+func (ps *PeerState) ShouldBanPeer() bool {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	// Ban after 3 hash verification failures
+	return ps.HashFailures >= 3
+}
+
+// UpdateRate calculates and updates the download rate
+func (ps *PeerState) UpdateRate() {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+
+	now := time.Now()
+	elapsed := now.Sub(ps.LastRateUpdate).Seconds()
+
+	// Update every 5 seconds minimum
+	if elapsed < 5.0 {
+		return
+	}
+
+	bytesDownloaded := ps.Downloaded - ps.LastDownloaded
+	ps.DownloadRate = float64(bytesDownloaded) / elapsed
+
+	// Track slow peer duration
+	const slowThreshold = 5 * 1024 // 5 KB/s
+	if ps.DownloadRate < slowThreshold && ps.Downloaded > 0 {
+		ps.SlowPeerDuration += time.Duration(elapsed) * time.Second
+	} else {
+		ps.SlowPeerDuration = 0 // Reset if speed improves
+	}
+
+	ps.LastRateUpdate = now
+	ps.LastDownloaded = ps.Downloaded
+}
+
+// IsTooSlow returns true if peer has been consistently slow
+func (ps *PeerState) IsTooSlow() bool {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	// Disconnect if slow for more than 30 seconds
+	return ps.SlowPeerDuration > 30*time.Second
+}
+
+// GetDownloadRate returns the current download rate
+func (ps *PeerState) GetDownloadRate() float64 {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	return ps.DownloadRate
 }

@@ -1,13 +1,3 @@
 bin/*
 data
 downloads/
-
-# Examples are WIP
-examples/
-
-# Documentation and README is WIP
-docs/
-README.md
-
-# Integration test code will be revised
-test_integration.go

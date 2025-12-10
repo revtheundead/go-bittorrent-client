@@ -24,6 +24,8 @@ type Torrent struct {
 
 	// Event forwarding
 	stopEventForwarder chan struct{}
+	stopped            bool
+	stopMu             sync.Mutex
 	wg                 sync.WaitGroup
 }
 
@@ -113,6 +115,14 @@ func (t *Torrent) Start() error {
 
 // Stop stops the torrent download/upload
 func (t *Torrent) Stop() error {
+	t.stopMu.Lock()
+	if t.stopped {
+		t.stopMu.Unlock()
+		return nil // Already stopped
+	}
+	t.stopped = true
+	t.stopMu.Unlock()
+
 	// Stop event forwarder
 	close(t.stopEventForwarder)
 	t.wg.Wait()

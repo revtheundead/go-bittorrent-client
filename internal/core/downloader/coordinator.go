@@ -2,8 +2,10 @@ package downloader
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/revtheundead/revtorrent/internal/core/piece"
 	"github.com/revtheundead/revtorrent/internal/core/storage"
@@ -47,6 +49,7 @@ type DownloadCoordinator struct {
 	peers             map[string]*PeerState // addr -> peer state
 	pieceStates       map[int]PieceStatus   // piece index -> status
 	pieceAvailability map[int]int           // piece index -> count of peers having it
+	pieceAssignedTime map[int]time.Time     // piece index -> time when assigned to downloading
 
 	// Coordination channels
 	pieceRequests    chan PieceRequest
@@ -82,17 +85,18 @@ func NewCoordinator(
 		pieceManager:      pieceManager,
 		torrentInfo:       torrentInfo,
 		logger:            logger,
-		selector:          NewRandomFirstSelector(),
+		selector:          NewRarestFirstSelector(),
 		peers:             make(map[string]*PeerState),
 		pieceStates:       make(map[int]PieceStatus),
 		pieceAvailability: make(map[int]int),
+		pieceAssignedTime: make(map[int]time.Time),
 		pieceRequests:     make(chan PieceRequest, 10),
 		pieceCompleted:    make(chan int, 10),
 		pieceFailed:       make(chan int, 10),
 		peerRegistered:    make(chan *PeerState, 10),
 		peerDisconnected:  make(chan string, 10),
 		endgameActive:     false,
-		endgameThreshold:  0.95,
+		endgameThreshold:  0.70,
 	}
 }
 
@@ -178,10 +182,17 @@ func (c *DownloadCoordinator) FailPiece(pieceIndex int) {
 
 // coordinationLoop is the main event loop for coordination
 func (c *DownloadCoordinator) coordinationLoop() {
+	// Ticker for detecting stalled pieces
+	stallCheckTicker := time.NewTicker(30 * time.Second)
+	defer stallCheckTicker.Stop()
+
 	for {
 		select {
 		case <-c.ctx.Done():
 			return
+
+		case <-stallCheckTicker.C:
+			c.checkForStalledPieces()
 
 		case req := <-c.pieceRequests:
 			c.handlePieceRequest(req)
@@ -223,6 +234,9 @@ func (c *DownloadCoordinator) handlePieceRequest(req PieceRequest) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// Check if we should activate endgame mode (important for avoiding idle peers)
+	c.checkEndgameMode()
+
 	// Build in-progress map (exclude in-progress in normal mode, allow in endgame)
 	inProgress := make(map[int]bool)
 	if !c.endgameActive {
@@ -254,6 +268,11 @@ func (c *DownloadCoordinator) handlePieceRequest(req PieceRequest) {
 	// Mark piece as downloading (may already be downloading in endgame mode)
 	c.pieceStates[pieceIndex] = PieceDownloading
 
+	// Track when piece was assigned for stall detection
+	if _, exists := c.pieceAssignedTime[pieceIndex]; !exists {
+		c.pieceAssignedTime[pieceIndex] = time.Now()
+	}
+
 	if c.endgameActive {
 		c.logger.Debug("assigned piece to peer (endgame)",
 			"piece", pieceIndex,
@@ -276,6 +295,7 @@ func (c *DownloadCoordinator) handlePieceComplete(pieceIndex int) {
 	defer c.mu.Unlock()
 
 	c.pieceStates[pieceIndex] = PieceComplete
+	delete(c.pieceAssignedTime, pieceIndex) // Remove timestamp
 
 	c.logger.Debug("piece marked complete", "piece", pieceIndex)
 
@@ -306,10 +326,11 @@ func (c *DownloadCoordinator) checkEndgameMode() {
 	// Activate endgame if we're at threshold
 	if progress >= c.endgameThreshold {
 		c.endgameActive = true
-		c.logger.Debug("endgame mode activated",
-			"progress", progress,
+		c.logger.Info("ENDGAME MODE ACTIVATED",
+			"progress", fmt.Sprintf("%.1f%%", progress*100),
 			"complete", complete,
-			"total", total)
+			"total", total,
+			"remaining", total-complete)
 	}
 }
 
@@ -320,6 +341,7 @@ func (c *DownloadCoordinator) handlePieceFailed(pieceIndex int) {
 
 	// Reset to needed so it can be reassigned
 	c.pieceStates[pieceIndex] = PieceNeeded
+	delete(c.pieceAssignedTime, pieceIndex) // Remove timestamp
 
 	c.logger.Debug("piece marked as failed, will retry", "piece", pieceIndex)
 }
@@ -366,6 +388,38 @@ func (c *DownloadCoordinator) handlePeerLeave(addr string) {
 	delete(c.peers, addr)
 
 	c.logger.Debug("peer unregistered", "addr", addr)
+}
+
+// checkForStalledPieces detects pieces that have been stuck in downloading state for too long
+func (c *DownloadCoordinator) checkForStalledPieces() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	now := time.Now()
+	const stallTimeout = 120 * time.Second // 2 minutes
+
+	var stalledPieces []int
+	for pieceIndex, assignedTime := range c.pieceAssignedTime {
+		if now.Sub(assignedTime) > stallTimeout {
+			if c.pieceStates[pieceIndex] == PieceDownloading {
+				stalledPieces = append(stalledPieces, pieceIndex)
+			}
+		}
+	}
+
+	// Fail stalled pieces so they can be reassigned
+	for _, pieceIndex := range stalledPieces {
+		c.logger.Warn("piece stalled, forcing reassignment",
+			"piece", pieceIndex,
+			"stalled_for", now.Sub(c.pieceAssignedTime[pieceIndex]))
+
+		c.pieceStates[pieceIndex] = PieceNeeded
+		delete(c.pieceAssignedTime, pieceIndex)
+	}
+
+	if len(stalledPieces) > 0 {
+		c.logger.Info("detected and reset stalled pieces", "count", len(stalledPieces))
+	}
 }
 
 // IsEndgameActive returns whether endgame mode is active
