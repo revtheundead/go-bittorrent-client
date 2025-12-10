@@ -10,8 +10,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 mkdir -p "$REPO_ROOT/bin"
 
 # Build
-go build -o "$REPO_ROOT/bin/go-bittorrent-client" \
-    "$REPO_ROOT/cmd/bittorrent-client"
+go build -o "$REPO_ROOT/bin/revtorrent" \
+    "$REPO_ROOT/cmd/revtorrent"
 
 # Run binary with passed arguments
-exec "$REPO_ROOT/bin/go-bittorrent-client" "$@"
+exec "$REPO_ROOT/bin/revtorrent" "$@"
