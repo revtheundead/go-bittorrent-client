@@ -394,7 +394,7 @@ Areas for improvement:
 
 ## License
 
-[Add your license here]
+MIT License
 
 ## References
 
